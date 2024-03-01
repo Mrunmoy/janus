@@ -14,14 +14,22 @@
 #ifndef CFUTURE_H
 #define CFUTURE_H
 
+#ifdef __cplusplus
+#include <atomic>
+#include <cstdbool>
+#include <cstddef>
+#include <cstdint>
+typedef std::atomic<uint_fast32_t> cfuture_atomic_uint_fast32_t;
+#else
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
 #if defined(__STDC_NO_ATOMICS__)
 #error "cfuture requires C11 atomic support or compiler atomic builtins"
 #else
 #include <stdatomic.h>
+typedef atomic_uint_fast32_t cfuture_atomic_uint_fast32_t;
+#endif
 #endif
 
 #ifdef __cplusplus
@@ -80,11 +88,11 @@ typedef struct {
  * @brief Single slot metadata within the static future/promise pool.
  */
 typedef struct {
-    atomic_uint_fast32_t ref_count; /**< Dual-owner refcount: 2 -> 1 -> 0. */
-    atomic_uint_fast32_t state;     /**< Current state (cfuture_state_t). */
-    int32_t error_code;             /**< Result status / error code (0 = success). */
-    void *event_handle;             /**< Injected OSAL synchronization handle. */
-    uint8_t *payload;               /**< Pointer into pool payload arena. */
+    cfuture_atomic_uint_fast32_t ref_count; /**< Dual-owner refcount: 2 -> 1 -> 0. */
+    cfuture_atomic_uint_fast32_t state;     /**< Current state (cfuture_state_t). */
+    int32_t error_code;                     /**< Result status / error code (0 = success). */
+    void *event_handle;                     /**< Injected OSAL synchronization handle. */
+    uint8_t *payload;                       /**< Pointer into pool payload arena. */
 } cfuture_slot_t;
 
 /* Forward declaration of pool container. */
@@ -94,12 +102,12 @@ typedef struct cfuture_pool cfuture_pool_t;
  * @brief Static Future/Promise pool container.
  */
 struct cfuture_pool {
-    uint32_t capacity;                   /**< Max concurrent slots (1..32). */
-    size_t payload_size;                 /**< Payload buffer size per slot in bytes. */
-    atomic_uint_fast32_t allocated_mask; /**< Atomic bitmask of occupied slot indices. */
-    cfuture_sync_ops_t sync_ops;         /**< Injected OSAL synchronization table. */
-    cfuture_slot_t *slots;               /**< Caller-provided array of slots [capacity]. */
-    uint8_t *payload_arena; /**< Caller-provided arena [capacity * payload_size]. */
+    uint32_t capacity;                           /**< Max concurrent slots (1..32). */
+    size_t payload_size;                         /**< Payload buffer size per slot in bytes. */
+    cfuture_atomic_uint_fast32_t allocated_mask; /**< Atomic bitmask of occupied slot indices. */
+    cfuture_sync_ops_t sync_ops;                 /**< Injected OSAL synchronization table. */
+    cfuture_slot_t *slots;         /**< Caller-provided array of slots [capacity]. */
+    uint8_t *payload_arena;        /**< Caller-provided arena [capacity * payload_size]. */
 };
 
 /**
