@@ -1,13 +1,12 @@
 /**
  * @file cfuture.h
- * @brief Zero-Heap Lock-Free Future/Promise Framework for Embedded C (Janus)
+ * @brief Zero-Heap Lock-Free Future/Promise Framework for Embedded C
  *
- * Provides a lightweight, static-pool-based future/promise concurrency abstraction
- * designed for resource-constrained microcontrollers and multi-threaded systems.
- * Eliminates dangling stack pointers across message queues and guarantees 0-us
- * immediate non-blocking timeout unwinding.
+ * Provides a static-pool-based future/promise concurrency abstraction designed
+ * for resource-constrained microcontrollers and multi-threaded systems. Eliminates
+ * dangling stack pointers across message queues and guarantees immediate non-blocking
+ * timeout unwinding.
  *
- * Copyright (c) 2026 Mrunmoy Samal. All rights reserved.
  * SPDX-License-Identifier: MIT
  */
 
@@ -33,7 +32,8 @@ typedef atomic_uint_fast32_t cfuture_atomic_uint_fast32_t;
 #endif
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
 /** Maximum supported capacity in a single pool (limited by 32-bit atomic mask). */
@@ -54,7 +54,8 @@ extern "C" {
 /**
  * @brief Internal lifecycle states of a pool slot.
  */
-typedef enum {
+typedef enum
+{
     CFUTURE_STATE_IDLE = 0,      /**< Slot is free and unallocated in pool. */
     CFUTURE_STATE_PENDING = 1,   /**< Slot is allocated; worker has not fulfilled yet. */
     CFUTURE_STATE_COMPLETED = 2, /**< Worker successfully fulfilled with a value. */
@@ -66,11 +67,12 @@ typedef enum {
 /**
  * @brief Pluggable OSAL synchronization interface table (Dependency Injection).
  *
- * Allows injecting platform synchronization primitives (POSIX, FreeRTOS, Zephyr,
- * or bare-metal polling) with zero #ifdefs in the core logic.
+ * Injects platform synchronization primitives (POSIX, FreeRTOS, Zephyr,
+ * or bare-metal polling) with zero #ifdefs in core logic.
  */
-typedef struct {
-    /** Allocates/initializes a synchronization primitive (e.g. event group or condvar). */
+typedef struct
+{
+    /** Allocates/initializes a synchronization primitive. */
     void *(*event_create)(void);
     /** Destroys/releases a synchronization primitive. */
     void (*event_destroy)(void *event_handle);
@@ -87,7 +89,8 @@ typedef struct {
 /**
  * @brief Single slot metadata within the static future/promise pool.
  */
-typedef struct {
+typedef struct
+{
     cfuture_atomic_uint_fast32_t ref_count; /**< Dual-owner refcount: 2 -> 1 -> 0. */
     cfuture_atomic_uint_fast32_t state;     /**< Current state (cfuture_state_t). */
     int32_t error_code;                     /**< Result status / error code (0 = success). */
@@ -101,7 +104,8 @@ typedef struct cfuture_pool cfuture_pool_t;
 /**
  * @brief Static Future/Promise pool container.
  */
-struct cfuture_pool {
+struct cfuture_pool
+{
     uint32_t capacity;                           /**< Max concurrent slots (1..32). */
     size_t payload_size;                         /**< Payload buffer size per slot in bytes. */
     cfuture_atomic_uint_fast32_t allocated_mask; /**< Atomic bitmask of occupied slot indices. */
@@ -113,7 +117,8 @@ struct cfuture_pool {
 /**
  * @brief Consumer handle held by the Caller task.
  */
-typedef struct {
+typedef struct
+{
     uint8_t slot_id;      /**< Index into pool->slots array, or CFUTURE_INVALID_SLOT. */
     cfuture_pool_t *pool; /**< Pointer to originating pool, or NULL if consumed/invalid. */
 } cfuture_t;
@@ -121,7 +126,8 @@ typedef struct {
 /**
  * @brief Producer handle passed to the Worker task or ISR.
  */
-typedef struct {
+typedef struct
+{
     uint8_t slot_id;      /**< Index into pool->slots array, or CFUTURE_INVALID_SLOT. */
     cfuture_pool_t *pool; /**< Pointer to originating pool, or NULL if consumed/invalid. */
 } cpromise_t;
@@ -129,14 +135,11 @@ typedef struct {
 /**
  * @brief Initializes a future pool with caller-provided static memory buffers.
  *
- * Zero dynamic memory allocation is performed.
- *
  * @param[out] pool         Pointer to pool struct to initialize.
  * @param[in]  capacity     Number of concurrent slots (1..32).
  * @param[in]  payload_size Size of result data per slot in bytes (can be 0).
  * @param[in]  slots_buf    User-provided buffer for cfuture_slot_t array [capacity].
- * @param[in]  payload_buf  User-provided buffer for payload arena [capacity * payload_size] (can be
- * NULL if payload_size == 0).
+ * @param[in]  payload_buf  User-provided buffer for payload arena [capacity * payload_size].
  * @param[in]  sync_ops     Synchronization callbacks table (can be NULL for manual polling).
  * @return true on success, false if parameters are invalid.
  */
@@ -154,8 +157,6 @@ void cfuture_pool_destroy(cfuture_pool_t *pool);
 /**
  * @brief Atomically creates a connected Promise/Future pair from the pool.
  *
- * Uses lock-free CAS on the pool bitmask to allocate a slot in O(1) time.
- *
  * @param[in,out] pool        The future pool instance.
  * @param[out]    out_promise Receives the producer handle.
  * @param[out]    out_future  Receives the consumer handle.
@@ -165,9 +166,6 @@ bool cfuture_create(cfuture_pool_t *pool, cpromise_t *out_promise, cfuture_t *ou
 
 /**
  * @brief Waits for the worker to fulfill the promise within a timeout.
- *
- * If the timeout expires, the caller drops its reference and returns false immediately
- * in 0 us without blocking on the worker. The worker will later recycle the slot when done.
  *
  * @param[in,out] future      The future handle. Invalidated upon return.
  * @param[in]     timeout_ms  Timeout in milliseconds (0 = non-blocking, UINT32_MAX = forever).
@@ -181,16 +179,12 @@ bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
 /**
  * @brief Explicitly abandons a future without waiting.
  *
- * The caller drops its reference immediately. The worker will recycle the slot when finished.
- *
  * @param[in,out] future The future handle. Invalidated upon return.
  */
 void cfuture_abandon(cfuture_t *future);
 
 /**
  * @brief Checks if the consumer is still actively waiting for the promise.
- *
- * Can be queried by the worker before starting expensive hardware operations.
  *
  * @param[in] promise The promise handle.
  * @return true if caller is still waiting, false if caller timed out or abandoned.
@@ -199,8 +193,6 @@ bool cpromise_is_active(const cpromise_t *promise);
 
 /**
  * @brief Fulfills the promise with a result value and notifies the consumer.
- *
- * Atomically publishes the payload and wakes up the waiting caller.
  *
  * @param[in,out] promise    The promise handle. Invalidated upon return.
  * @param[in]     payload    Result data to copy into pool slot (optional if payload_size == 0).
@@ -219,8 +211,6 @@ void cpromise_drop(cpromise_t *promise, int32_t error_code);
 /**
  * @brief Fulfills the promise from an Interrupt Service Routine (ISR).
  *
- * Safe to call from hardware interrupt handlers. Calls event_set_from_isr if available.
- *
  * @param[in,out] promise    The promise handle. Invalidated upon return.
  * @param[in]     payload    Result data to copy into pool slot (optional if payload_size == 0).
  * @param[in]     error_code Status code (0 = success).
@@ -237,8 +227,6 @@ void cpromise_drop_from_isr(cpromise_t *promise, int32_t error_code);
 
 /**
  * @brief Helper macro to allocate static storage buffers for a pool.
- *
- * Declares the slot array and payload buffer with static storage duration.
  */
 #define CFUTURE_DEFINE_STATIC_BUFFERS(pool_name, payload_type, capacity)                           \
     static cfuture_slot_t pool_name##_slots[(capacity)];                                           \
@@ -246,39 +234,45 @@ void cpromise_drop_from_isr(cpromise_t *promise, int32_t error_code);
 
 /**
  * @brief Macro generating type-safe wrapper functions for a subsystem future/promise.
- *
- * Provides compile-time type safety without void* casts in subsystem client code.
  */
 #define CFUTURE_DEFINE_TYPED_POOL(subsystem_name, payload_type, pool_capacity)                    \
-    typedef struct {                                                                               \
+    typedef struct                                                                                 \
+    {                                                                                              \
         uint8_t slot_id;                                                                           \
         cfuture_pool_t *pool;                                                                      \
     } subsystem_name##_future_t;                                                                   \
-    typedef struct {                                                                               \
+    typedef struct                                                                                 \
+    {                                                                                              \
         uint8_t slot_id;                                                                           \
         cfuture_pool_t *pool;                                                                      \
     } subsystem_name##_promise_t;                                                                  \
     static inline bool subsystem_name##_create(                                                    \
-        cfuture_pool_t *pool, subsystem_name##_promise_t *p, subsystem_name##_future_t *f) {       \
+        cfuture_pool_t *pool, subsystem_name##_promise_t *p, subsystem_name##_future_t *f)         \
+    {                                                                                              \
         return cfuture_create(pool, (cpromise_t *)p, (cfuture_t *)f);                              \
     }                                                                                              \
     static inline bool subsystem_name##_future_wait(                                               \
         subsystem_name##_future_t *f, uint32_t timeout_ms, payload_type *out_val,                 \
-        int32_t *out_err) {                                                                        \
-        return cfuture_wait_for((cfuture_t *)f, timeout_ms, (void *)out_val, out_err);            \
+        int32_t *out_err)                                                                          \
+    {                                                                                              \
+        return cfuture_wait_for((cfuture_t *)f, timeout_ms, (void *)out_val, out_err);              \
     }                                                                                              \
-    static inline void subsystem_name##_future_abandon(subsystem_name##_future_t *f) {             \
+    static inline void subsystem_name##_future_abandon(subsystem_name##_future_t *f)               \
+    {                                                                                              \
         cfuture_abandon((cfuture_t *)f);                                                           \
     }                                                                                              \
-    static inline bool subsystem_name##_promise_is_active(const subsystem_name##_promise_t *p) {   \
+    static inline bool subsystem_name##_promise_is_active(const subsystem_name##_promise_t *p)     \
+    {                                                                                              \
         return cpromise_is_active((const cpromise_t *)p);                                          \
     }                                                                                              \
     static inline void subsystem_name##_promise_set(                                               \
-        subsystem_name##_promise_t *p, const payload_type *val, int32_t err) {                    \
-        cpromise_set_value((cpromise_t *)p, (const void *)val, err);                              \
+        subsystem_name##_promise_t *p, const payload_type *val, int32_t err)                      \
+    {                                                                                              \
+        cpromise_set_value((cpromise_t *)p, (const void *)val, err);                                \
     }                                                                                              \
-    static inline void subsystem_name##_promise_drop(subsystem_name##_promise_t *p, int32_t err) { \
-        cpromise_drop((cpromise_t *)p, err);                                                      \
+    static inline void subsystem_name##_promise_drop(subsystem_name##_promise_t *p, int32_t err)   \
+    {                                                                                              \
+        cpromise_drop((cpromise_t *)p, err);                                                        \
     }
 
 #ifdef __cplusplus
