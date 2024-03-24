@@ -26,8 +26,8 @@ static inline void cfuture_slot_recycle(cfuture_pool_t *pool, uint8_t slot_id)
     }
 
     cfuture_slot_t *slot = &pool->slots[slot_id];
-    atomic_store_explicit(&slot->state, (uint_fast32_t)CFUTURE_STATE_IDLE, memory_order_relaxed);
-    atomic_store_explicit(&slot->ref_count, 0U, memory_order_relaxed);
+    atomic_store_explicit(&slot->state, (uint_fast32_t)CFUTURE_STATE_IDLE, memory_order_release);
+    atomic_store_explicit(&slot->ref_count, 0U, memory_order_release);
 
     /* Release ordering guarantees all previous slot writes are visible before recycling */
     atomic_fetch_and_explicit(&pool->allocated_mask, ~((uint_fast32_t)1U << slot_id),
@@ -150,6 +150,8 @@ static void cpromise_fulfill_impl(cpromise_t *promise, const void *payload, int3
 
     slot->error_code = error_code;
 
+    atomic_thread_fence(memory_order_release);
+
     uint_fast32_t expected = (uint_fast32_t)CFUTURE_STATE_PENDING;
     if (atomic_compare_exchange_strong_explicit(&slot->state, &expected,
                                                 (uint_fast32_t)CFUTURE_STATE_COMPLETED,
@@ -212,6 +214,8 @@ static bool cfuture_consume_result(cfuture_pool_t *pool, uint8_t slot_id, uint_f
 
     if (state == (uint_fast32_t)CFUTURE_STATE_COMPLETED)
     {
+        atomic_thread_fence(memory_order_acquire);
+
         if (out_payload && slot->payload && pool->payload_size > 0U)
         {
             memcpy(out_payload, slot->payload, pool->payload_size);
@@ -332,7 +336,7 @@ bool cfuture_create(cfuture_pool_t *pool, cpromise_t *out_promise, cfuture_t *ou
     }
 
     slot->error_code = 0;
-    atomic_store_explicit(&slot->state, (uint_fast32_t)CFUTURE_STATE_PENDING, memory_order_relaxed);
+    atomic_store_explicit(&slot->state, (uint_fast32_t)CFUTURE_STATE_PENDING, memory_order_release);
     atomic_store_explicit(&slot->ref_count, 2U, memory_order_release);
 
     out_promise->slot_id = slot_id;
@@ -425,7 +429,7 @@ bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
             }
             else
             {
-                st = expected;
+                st = atomic_load_explicit(&slot->state, memory_order_acquire);
             }
         }
     }

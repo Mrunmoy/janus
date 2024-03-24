@@ -24,6 +24,25 @@ else()
     set(CFUTURE_BUILD_EXAMPLES OFF)
 endif()
 
+# Sanitizer options
+if(CFUTURE_ENABLE_TSAN)
+    message(STATUS "Enabling ThreadSanitizer (-fsanitize=thread)")
+    add_compile_options(-fsanitize=thread -g -O1)
+    add_link_options(-fsanitize=thread)
+endif()
+
+if(CFUTURE_ENABLE_ASAN)
+    message(STATUS "Enabling AddressSanitizer and UndefinedBehaviorSanitizer")
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
+if(CFUTURE_ENABLE_COVERAGE)
+    message(STATUS "Enabling code coverage instrumentation")
+    add_compile_options(--coverage -O0 -g)
+    add_link_options(--coverage)
+endif()
+
 # Core library
 add_library(cfuture STATIC
     src/cfuture.c
@@ -61,25 +80,6 @@ endif()
 # Threading library dependency (pthread for posix adapter)
 find_package(Threads REQUIRED)
 target_link_libraries(cfuture PUBLIC Threads::Threads)
-
-# Sanitizer options
-if(CFUTURE_ENABLE_TSAN)
-    message(STATUS "Enabling ThreadSanitizer (-fsanitize=thread)")
-    add_compile_options(-fsanitize=thread -g -O1)
-    add_link_options(-fsanitize=thread)
-endif()
-
-if(CFUTURE_ENABLE_ASAN)
-    message(STATUS "Enabling AddressSanitizer and UndefinedBehaviorSanitizer")
-    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1)
-    add_link_options(-fsanitize=address,undefined)
-endif()
-
-if(CFUTURE_ENABLE_COVERAGE)
-    message(STATUS "Enabling code coverage instrumentation")
-    target_compile_options(cfuture PRIVATE --coverage -O0 -g)
-    target_link_options(cfuture PRIVATE --coverage)
-endif()
 
 # Custom verification targets
 add_custom_target(size-check

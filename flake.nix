@@ -1,5 +1,5 @@
 {
-  description = "libcfuture (Janus): Zero-Heap Lock-Free Future/Promise Framework for Embedded C";
+  description = "libcfuture: Zero-Heap Lock-Free Future/Promise Framework for Embedded C";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -19,8 +19,7 @@
             cmake
             ninja
             pkg-config
-            clang_14
-            gcc11
+            llvmPackages.clang
             cppcheck
             clang-tools
             lcov
@@ -31,7 +30,7 @@
           shellHook = ''
             export CC=clang
             export CXX=clang++
-            echo "libcfuture development shell initialized."
+            echo "libcfuture development shell initialized with Clang."
           '';
         };
       });
