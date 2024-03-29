@@ -20,6 +20,7 @@
             ninja
             pkg-config
             llvmPackages.clang
+            llvmPackages.bintools
             cppcheck
             clang-tools
             lcov

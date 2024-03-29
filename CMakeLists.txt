@@ -39,7 +39,7 @@ endif()
 
 if(CFUTURE_ENABLE_COVERAGE)
     message(STATUS "Enabling code coverage instrumentation")
-    add_compile_options(--coverage -O0 -g)
+    add_compile_options(--coverage -O1 -g -Wno-error)
     add_link_options(--coverage)
 endif()
 

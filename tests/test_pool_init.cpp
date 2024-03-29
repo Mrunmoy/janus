@@ -3,9 +3,11 @@
 
 #include <gtest/gtest.h>
 
-class PoolInitTest : public ::testing::Test {
-protected:
-    void SetUp() override {
+class PoolInitTest : public ::testing::Test
+{
+  protected:
+    void SetUp() override
+    {
         cfuture::testing::MockSyncController::instance().reset();
     }
 
@@ -17,28 +19,37 @@ protected:
     cfuture_pool_t pool;
 };
 
-TEST_F(PoolInitTest, RejectsNullPoolPointer) {
-    EXPECT_FALSE(cfuture_pool_init(nullptr, kCapacity, kPayloadSize, slots, payload_arena, nullptr));
+TEST_F(PoolInitTest, RejectsNullPoolPointer)
+{
+    EXPECT_FALSE(
+        cfuture_pool_init(nullptr, kCapacity, kPayloadSize, slots, payload_arena, nullptr));
 }
 
-TEST_F(PoolInitTest, RejectsZeroCapacity) {
+TEST_F(PoolInitTest, RejectsZeroCapacity)
+{
     EXPECT_FALSE(cfuture_pool_init(&pool, 0, kPayloadSize, slots, payload_arena, nullptr));
 }
 
-TEST_F(PoolInitTest, RejectsCapacityExceedingMaximum) {
+TEST_F(PoolInitTest, RejectsCapacityExceedingMaximum)
+{
     cfuture_slot_t large_slots[CFUTURE_MAX_CAPACITY + 1];
-    EXPECT_FALSE(cfuture_pool_init(&pool, CFUTURE_MAX_CAPACITY + 1, 0, large_slots, nullptr, nullptr));
+    EXPECT_FALSE(
+        cfuture_pool_init(&pool, CFUTURE_MAX_CAPACITY + 1, 0, large_slots, nullptr, nullptr));
 }
 
-TEST_F(PoolInitTest, RejectsNullSlotsBuffer) {
-    EXPECT_FALSE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, nullptr, payload_arena, nullptr));
+TEST_F(PoolInitTest, RejectsNullSlotsBuffer)
+{
+    EXPECT_FALSE(
+        cfuture_pool_init(&pool, kCapacity, kPayloadSize, nullptr, payload_arena, nullptr));
 }
 
-TEST_F(PoolInitTest, RejectsNullPayloadBufferWhenPayloadSizeNonZero) {
+TEST_F(PoolInitTest, RejectsNullPayloadBufferWhenPayloadSizeNonZero)
+{
     EXPECT_FALSE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, nullptr, nullptr));
 }
 
-TEST_F(PoolInitTest, AcceptsZeroPayloadSizeWithNullPayloadBuffer) {
+TEST_F(PoolInitTest, AcceptsZeroPayloadSizeWithNullPayloadBuffer)
+{
     EXPECT_TRUE(cfuture_pool_init(&pool, kCapacity, 0, slots, nullptr, nullptr));
     EXPECT_EQ(pool.capacity, kCapacity);
     EXPECT_EQ(pool.payload_size, 0U);
@@ -46,13 +57,15 @@ TEST_F(PoolInitTest, AcceptsZeroPayloadSizeWithNullPayloadBuffer) {
     EXPECT_EQ(pool.allocated_mask.load(), 0U);
 }
 
-TEST_F(PoolInitTest, InitializesSlotsAndInvokesEventCreate) {
+TEST_F(PoolInitTest, InitializesSlotsAndInvokesEventCreate)
+{
     auto sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
     ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
 
     EXPECT_EQ(cfuture::testing::MockSyncController::instance().create_count.load(), kCapacity);
 
-    for (uint32_t i = 0; i < kCapacity; ++i) {
+    for (uint32_t i = 0; i < kCapacity; ++i)
+    {
         EXPECT_EQ(pool.slots[i].ref_count.load(), 0U);
         EXPECT_EQ(pool.slots[i].state.load(), (uint_fast32_t)CFUTURE_STATE_IDLE);
         EXPECT_EQ(pool.slots[i].error_code, 0);
@@ -64,14 +77,16 @@ TEST_F(PoolInitTest, InitializesSlotsAndInvokesEventCreate) {
     EXPECT_EQ(cfuture::testing::MockSyncController::instance().destroy_count.load(), kCapacity);
 }
 
-TEST_F(PoolInitTest, CreateAllocatesSequentialSlotsUntilFull) {
+TEST_F(PoolInitTest, CreateAllocatesSequentialSlotsUntilFull)
+{
     auto sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
     ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
 
     cpromise_t promises[kCapacity];
     cfuture_t futures[kCapacity];
 
-    for (uint32_t i = 0; i < kCapacity; ++i) {
+    for (uint32_t i = 0; i < kCapacity; ++i)
+    {
         EXPECT_TRUE(cfuture_create(&pool, &promises[i], &futures[i]));
         EXPECT_EQ(promises[i].slot_id, i);
         EXPECT_EQ(promises[i].pool, &pool);
@@ -95,7 +110,8 @@ TEST_F(PoolInitTest, CreateAllocatesSequentialSlotsUntilFull) {
     cfuture_pool_destroy(&pool);
 }
 
-TEST_F(PoolInitTest, CreateRejectsNullArguments) {
+TEST_F(PoolInitTest, CreateRejectsNullArguments)
+{
     ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, nullptr));
 
     cpromise_t p;

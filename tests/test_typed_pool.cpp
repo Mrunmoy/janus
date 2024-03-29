@@ -3,7 +3,8 @@
 
 #include <gtest/gtest.h>
 
-struct MotorTelemetry {
+struct MotorTelemetry
+{
     float rpm;
     float current_amps;
     int32_t fault_code;
@@ -11,15 +12,19 @@ struct MotorTelemetry {
 
 CFUTURE_DEFINE_TYPED_POOL(Motor, MotorTelemetry, 4)
 
-class TypedPoolTest : public ::testing::Test {
-protected:
-    void SetUp() override {
+class TypedPoolTest : public ::testing::Test
+{
+  protected:
+    void SetUp() override
+    {
         cfuture::testing::MockSyncController::instance().reset();
         auto sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
-        ASSERT_TRUE(cfuture_pool_init(&pool, 4, sizeof(MotorTelemetry), slots, payload_arena, &sync_ops));
+        ASSERT_TRUE(
+            cfuture_pool_init(&pool, 4, sizeof(MotorTelemetry), slots, payload_arena, &sync_ops));
     }
 
-    void TearDown() override {
+    void TearDown() override
+    {
         cfuture_pool_destroy(&pool);
     }
 
@@ -28,7 +33,8 @@ protected:
     cfuture_pool_t pool;
 };
 
-TEST_F(TypedPoolTest, TypedCreateAndFulfill) {
+TEST_F(TypedPoolTest, TypedCreateAndFulfill)
+{
     Motor_promise_t promise;
     Motor_future_t future;
 
@@ -50,7 +56,8 @@ TEST_F(TypedPoolTest, TypedCreateAndFulfill) {
     EXPECT_EQ(pool.allocated_mask.load(), 0U);
 }
 
-TEST_F(TypedPoolTest, TypedDropPropagatesErrorCode) {
+TEST_F(TypedPoolTest, TypedDropPropagatesErrorCode)
+{
     Motor_promise_t promise;
     Motor_future_t future;
 
@@ -66,7 +73,8 @@ TEST_F(TypedPoolTest, TypedDropPropagatesErrorCode) {
     EXPECT_EQ(pool.allocated_mask.load(), 0U);
 }
 
-TEST_F(TypedPoolTest, TypedAbandon) {
+TEST_F(TypedPoolTest, TypedAbandon)
+{
     Motor_promise_t promise;
     Motor_future_t future;
 

@@ -32,7 +32,7 @@ struct Payload
 
 class ThreadSafeChannel
 {
-public:
+  public:
     void push(cfuture_t f)
     {
         std::unique_lock<std::mutex> lock(mtx_);
@@ -62,7 +62,7 @@ public:
         cv_.notify_all();
     }
 
-private:
+  private:
     std::mutex mtx_;
     std::condition_variable cv_;
     std::deque<cfuture_t> items_;
@@ -73,12 +73,12 @@ private:
 
 class ConcurrencyStressTest : public ::testing::Test
 {
-protected:
+  protected:
     void SetUp() override
     {
         const cfuture_sync_ops_t *posix_ops = cfuture_posix_sync_ops();
-        ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, sizeof(Payload), slots, payload_arena,
-                                      posix_ops));
+        ASSERT_TRUE(
+            cfuture_pool_init(&pool, kCapacity, sizeof(Payload), slots, payload_arena, posix_ops));
     }
 
     void TearDown() override
@@ -113,65 +113,67 @@ TEST_F(ConcurrencyStressTest, ConcurrentCreateFulfillConsumeCycles)
     // Launch consumer threads
     for (uint32_t cid = 0; cid < kNumConsumers; ++cid)
     {
-        consumers.emplace_back([&channel, &completed_cycles, &dropped_cycles, &timeout_cycles]()
-        {
-            cfuture_t f;
-            while (channel.pop(f))
+        consumers.emplace_back(
+            [&channel, &completed_cycles, &dropped_cycles, &timeout_cycles]()
             {
-                Payload rx{};
-                int32_t err = 0;
+                cfuture_t f;
+                while (channel.pop(f))
+                {
+                    Payload rx{};
+                    int32_t err = 0;
 
-                if (cfuture_wait_for(&f, 100, &rx, &err))
-                {
-                    EXPECT_EQ(rx.checksum, rx.sequence_id ^ rx.thread_id ^ 0xA5A5A5A5U);
-                    completed_cycles.fetch_add(1, std::memory_order_relaxed);
-                }
-                else
-                {
-                    if (err == -42)
+                    if (cfuture_wait_for(&f, 100, &rx, &err))
                     {
-                        dropped_cycles.fetch_add(1, std::memory_order_relaxed);
+                        EXPECT_EQ(rx.checksum, rx.sequence_id ^ rx.thread_id ^ 0xA5A5A5A5U);
+                        completed_cycles.fetch_add(1, std::memory_order_relaxed);
                     }
                     else
                     {
-                        timeout_cycles.fetch_add(1, std::memory_order_relaxed);
+                        if (err == -42)
+                        {
+                            dropped_cycles.fetch_add(1, std::memory_order_relaxed);
+                        }
+                        else
+                        {
+                            timeout_cycles.fetch_add(1, std::memory_order_relaxed);
+                        }
                     }
                 }
-            }
-        });
+            });
     }
 
     // Launch producer threads
     for (uint32_t pid = 0; pid < kNumProducers; ++pid)
     {
-        producers.emplace_back([this, pid, &channel, &total_created]()
-        {
-            uint32_t seq = 0;
-            while (total_created.fetch_add(1, std::memory_order_relaxed) < kTotalCycles)
+        producers.emplace_back(
+            [this, pid, &channel, &total_created]()
             {
-                cpromise_t p;
-                cfuture_t f;
-
-                while (!cfuture_create(&pool, &p, &f))
+                uint32_t seq = 0;
+                while (total_created.fetch_add(1, std::memory_order_relaxed) < kTotalCycles)
                 {
-                    std::this_thread::yield();
-                }
+                    cpromise_t p;
+                    cfuture_t f;
 
-                channel.push(f);
+                    while (!cfuture_create(&pool, &p, &f))
+                    {
+                        std::this_thread::yield();
+                    }
 
-                if ((seq % 50) == 0)
-                {
-                    cpromise_drop(&p, -42);
-                }
-                else
-                {
-                    Payload pl{seq, pid, seq ^ pid ^ 0xA5A5A5A5U};
-                    cpromise_set_value(&p, &pl, 0);
-                }
+                    channel.push(f);
 
-                ++seq;
-            }
-        });
+                    if ((seq % 50) == 0)
+                    {
+                        cpromise_drop(&p, -42);
+                    }
+                    else
+                    {
+                        Payload pl{seq, pid, seq ^ pid ^ 0xA5A5A5A5U};
+                        cpromise_set_value(&p, &pl, 0);
+                    }
+
+                    ++seq;
+                }
+            });
     }
 
     for (auto &t : producers)
