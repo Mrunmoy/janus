@@ -21,12 +21,12 @@ extern "C"
 /** Maximum concurrent POSIX events supported in the static pool. */
 #define CFUTURE_POSIX_MAX_EVENTS ((uint32_t)128U)
 
-/**
- * @brief Returns the singleton POSIX synchronization operations table.
- *
- * @return Pointer to static cfuture_sync_ops_t structure.
- */
-const cfuture_sync_ops_t *cfuture_posix_sync_ops(void);
+    /**
+     * @brief Returns the singleton POSIX synchronization operations table.
+     *
+     * @return Pointer to static cfuture_sync_ops_t structure.
+     */
+    const cfuture_sync_ops_t *cfuture_posix_sync_ops(void);
 
 #ifdef __cplusplus
 }
