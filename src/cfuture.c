@@ -56,6 +56,33 @@ static inline uint_fast32_t cfuture_slot_release_ref(cfuture_pool_t *pool, uint8
 
 #define CFUTURE_CAS_MAX_RETRIES ((uint32_t)1000U)
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+/**
+ * @brief Portable count trailing zeros for 32-bit integers on MSVC.
+ *
+ * @param mask Non-zero 32-bit mask.
+ * @return Number of trailing zero bits.
+ */
+static inline int cfuture_ctz32(uint32_t mask)
+{
+    unsigned long index;
+    _BitScanForward(&index, mask);
+    return (int)index;
+}
+#else
+/**
+ * @brief Portable count trailing zeros for 32-bit integers on GCC/Clang.
+ *
+ * @param mask Non-zero 32-bit mask.
+ * @return Number of trailing zero bits.
+ */
+static inline int cfuture_ctz32(uint32_t mask)
+{
+    return __builtin_ctz((unsigned int)mask);
+}
+#endif
+
 /**
  * @brief Attempts to allocate an unused slot index using lock-free CAS.
  *
@@ -80,7 +107,7 @@ static uint8_t cfuture_pool_claim_slot(cfuture_pool_t *pool)
             return CFUTURE_INVALID_SLOT;
         }
 
-        int bit = __builtin_ctz((unsigned int)available);
+        int bit = cfuture_ctz32((uint32_t)available);
         uint_fast32_t new_mask = current_mask | ((uint_fast32_t)1U << bit);
 
         if (atomic_compare_exchange_weak_explicit(&pool->allocated_mask, &current_mask, new_mask,
@@ -280,6 +307,27 @@ bool cfuture_pool_init(cfuture_pool_t *pool, uint32_t capacity, size_t payload_s
         if (pool->sync_ops.event_create)
         {
             slots_buf[i].event_handle = pool->sync_ops.event_create();
+            if (!slots_buf[i].event_handle)
+            {
+                if (pool->sync_ops.event_destroy)
+                {
+                    for (uint32_t j = 0; j < i; ++j)
+                    {
+                        if (slots_buf[j].event_handle)
+                        {
+                            pool->sync_ops.event_destroy(slots_buf[j].event_handle);
+                            slots_buf[j].event_handle = NULL;
+                        }
+                    }
+                }
+
+                pool->slots = NULL;
+                pool->capacity = 0U;
+                pool->payload_size = 0U;
+                pool->payload_arena = NULL;
+                atomic_store_explicit(&pool->allocated_mask, 0U, memory_order_relaxed);
+                return false;
+            }
         }
         else
         {

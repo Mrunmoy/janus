@@ -43,11 +43,22 @@ if(CFUTURE_ENABLE_COVERAGE)
     add_link_options(--coverage)
 endif()
 
+# Platform-specific sources
+set(CFUTURE_PLATFORM_SOURCES
+    src/adapters/cfuture_polling.c
+)
+
+if(WIN32)
+    list(APPEND CFUTURE_PLATFORM_SOURCES src/adapters/cfuture_win32.c)
+else()
+    list(APPEND CFUTURE_PLATFORM_SOURCES src/adapters/cfuture_posix.c)
+    find_package(Threads REQUIRED)
+endif()
+
 # Core library
 add_library(cfuture STATIC
     src/cfuture.c
-    src/adapters/cfuture_posix.c
-    src/adapters/cfuture_polling.c
+    ${CFUTURE_PLATFORM_SOURCES}
 )
 
 target_include_directories(cfuture
@@ -63,7 +74,9 @@ set_target_properties(cfuture PROPERTIES
 )
 
 # Strict warning flags
-if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+if(MSVC)
+    target_compile_options(cfuture PRIVATE /W4 /WX)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(cfuture PRIVATE
         -Wall
         -Wextra
@@ -77,9 +90,10 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     )
 endif()
 
-# Threading library dependency (pthread for posix adapter)
-find_package(Threads REQUIRED)
-target_link_libraries(cfuture PUBLIC Threads::Threads)
+# Threading library dependency (pthread for posix adapter on Unix/macOS)
+if(NOT WIN32)
+    target_link_libraries(cfuture PUBLIC Threads::Threads)
+endif()
 
 # Custom verification targets
 add_custom_target(size-check
