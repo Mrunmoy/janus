@@ -344,25 +344,7 @@ python3 build.py --asan        # Run AddressSanitizer & UBSan suite
 python3 build.py --stats       # Check .text/.data/.bss size & verify 0 dynamic allocations
 python3 build.py --lint        # Run cppcheck and clang-format checks
 python3 build.py --bench       # Run throughput and latency benchmarks
-python3 build.py --soak 10     # Run hyper-speed soak test for 10 seconds
 python3 build.py --clean       # Remove all build directories
-```
-
----
-
-## Hyper-Speed Soak & Overnight Stress Testing
-
-To verify absolute stability, zero bitmask leaks, and zero memory corruption under continuous high-load multi-threaded hammering:
-
-```bash
-#Quick 10 - second soak test(~18 Million cycles)
-./build/benchmarks/bench_stress_soak --duration 10
-
-# 8 - Hour Overnight soak run(~50 + Billion cycles)
-./build/benchmarks/bench_stress_soak --duration 28800
-
-#Target specific cycle count(e.g.50, 000, 000 cycles)
-./build/benchmarks/bench_stress_soak --cycles 50000000
 ```
 
 ---

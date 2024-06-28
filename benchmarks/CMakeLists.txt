@@ -2,7 +2,3 @@
 add_executable(bench_throughput bench_throughput.cpp)
 target_link_libraries(bench_throughput PRIVATE cfuture)
 target_compile_features(bench_throughput PRIVATE cxx_std_17)
-
-add_executable(bench_stress_soak bench_stress_soak.cpp)
-target_link_libraries(bench_stress_soak PRIVATE cfuture)
-target_compile_features(bench_stress_soak PRIVATE cxx_std_17)

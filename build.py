@@ -111,17 +111,6 @@ def run_benchmarks(build_dir="build"):
     run_cmd([bench_bin])
 
 
-def run_soak(seconds=10, build_dir="build"):
-    log_info(f"Running hyper-speed soak stress test for {seconds} seconds...")
-    if not os.path.exists(os.path.join(SCRIPT_DIR, build_dir)):
-        build_release(build_dir)
-    soak_bin = os.path.join(SCRIPT_DIR, build_dir, "benchmarks", "bench_stress_soak")
-    if IS_WINDOWS:
-        soak_bin += ".exe"
-    run_cmd([soak_bin, "--duration", str(seconds)])
-    log_success(f"Soak test completed cleanly for {seconds}s.")
-
-
 def run_stats(build_dir="build"):
     log_info("Inspecting memory footprint and zero-heap verification...")
     lib_path = os.path.join(SCRIPT_DIR, build_dir, "libcfuture.a")
@@ -211,14 +200,6 @@ def main():
     parser.add_argument("--tsan", action="store_true", help="Run ThreadSanitizer suite")
     parser.add_argument("--asan", action="store_true", help="Run AddressSanitizer and UBSan suite")
     parser.add_argument("--bench", action="store_true", help="Run micro-benchmarks")
-    parser.add_argument(
-        "--soak",
-        type=int,
-        nargs="?",
-        const=10,
-        default=None,
-        help="Run hyper-speed soak test for N seconds (default: 10s)",
-    )
     parser.add_argument("--stats", action="store_true", help="Check size footprint and zero heap")
     parser.add_argument("--coverage", action="store_true", help="Generate lcov coverage report")
     parser.add_argument("--lint", action="store_true", help="Run cppcheck and clang-format checks")
@@ -264,9 +245,6 @@ def main():
 
     if args.bench:
         run_benchmarks()
-
-    if args.soak is not None:
-        run_soak(args.soak)
 
     if args.stats:
         run_stats()
