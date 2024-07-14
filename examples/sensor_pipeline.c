@@ -137,7 +137,7 @@ static void *servicer_task_entry(void *arg)
 
     while (true)
     {
-        storage_cmd_t cmd;
+        storage_cmd_t cmd = {0};
         if (!cmd_queue_pop(&s_cmd_queue, &cmd))
         {
             break;
@@ -221,15 +221,15 @@ int main(void)
     }
 
     /* Start Servicer Task (T_S) */
-    pthread_t servicer_thread;
+    pthread_t servicer_thread = 0;
     pthread_create(&servicer_thread, NULL, servicer_task_entry, NULL);
 
     /* -----------------------------------------------------------------
      * Scenario 1: Happy Path (Caller T_A dispatches, Servicer completes)
      * ----------------------------------------------------------------- */
     printf("--- [Scenario 1: Happy Path Asynchronous Request] ---\n");
-    cpromise_t p1;
-    cfuture_t f1;
+    cpromise_t p1 = {.slot_id = CFUTURE_INVALID_SLOT, .pool = NULL};
+    cfuture_t f1 = {.slot_id = CFUTURE_INVALID_SLOT, .pool = NULL};
     if (cfuture_create(&s_nvm_pool, &p1, &f1))
     {
         printf("[Task T_A] Claimed Slot %u. Enqueueing write for Block #100 (Work: 20 ms, Timeout: "
@@ -244,7 +244,7 @@ int main(void)
         };
         cmd_queue_push(&s_cmd_queue, &cmd1);
 
-        storage_result_t res1;
+        storage_result_t res1 = {0};
         int32_t err1 = 0;
         if (cfuture_wait_for(&f1, 100, &res1, &err1))
         {
@@ -257,8 +257,8 @@ int main(void)
      * Scenario 2: Timeout, Work Cancellation & Zero Queue ABA Collision
      * ----------------------------------------------------------------- */
     printf("--- [Scenario 2: Timeout, Cancellation & ABA Slot Isolation] ---\n");
-    cpromise_t p2;
-    cfuture_t f2;
+    cpromise_t p2 = {.slot_id = CFUTURE_INVALID_SLOT, .pool = NULL};
+    cfuture_t f2 = {.slot_id = CFUTURE_INVALID_SLOT, .pool = NULL};
     if (cfuture_create(&s_nvm_pool, &p2, &f2))
     {
         uint8_t slot_a = f2.slot_id;
@@ -274,7 +274,7 @@ int main(void)
         };
         cmd_queue_push(&s_cmd_queue, &cmd2);
 
-        storage_result_t res2;
+        storage_result_t res2 = {0};
         int32_t err2 = 0;
         if (!cfuture_wait_for(&f2, 20, &res2, &err2))
         {
@@ -285,8 +285,8 @@ int main(void)
         /* Concurrently, Task T_B arrives immediately while T_A's request is STILL in T_S's queue!
          */
         printf("\n[Task T_B] Arriving while T_A's request is still queued in T_S...\n");
-        cpromise_t p3;
-        cfuture_t f3;
+        cpromise_t p3 = {.slot_id = CFUTURE_INVALID_SLOT, .pool = NULL};
+        cfuture_t f3 = {.slot_id = CFUTURE_INVALID_SLOT, .pool = NULL};
         if (cfuture_create(&s_nvm_pool, &p3, &f3))
         {
             uint8_t slot_b = f3.slot_id;
@@ -309,8 +309,8 @@ int main(void)
      * ----------------------------------------------------------------- */
     printf("\n--- [Scenario 2b: Work Cancellation Before Starting] ---\n");
     /* Enqueue a slow blocker job first so Servicer is busy */
-    cpromise_t p_slow;
-    cfuture_t f_slow;
+    cpromise_t p_slow = {.slot_id = CFUTURE_INVALID_SLOT, .pool = NULL};
+    cfuture_t f_slow = {.slot_id = CFUTURE_INVALID_SLOT, .pool = NULL};
     cfuture_create(&s_nvm_pool, &p_slow, &f_slow);
     storage_cmd_t cmd_slow = {
         .block_id = 250,
@@ -321,8 +321,8 @@ int main(void)
     cmd_queue_push(&s_cmd_queue, &cmd_slow);
 
     /* Immediately enqueue a second job with a 10 ms deadline */
-    cpromise_t p_queued;
-    cfuture_t f_queued;
+    cpromise_t p_queued = {.slot_id = CFUTURE_INVALID_SLOT, .pool = NULL};
+    cfuture_t f_queued = {.slot_id = CFUTURE_INVALID_SLOT, .pool = NULL};
     cfuture_create(&s_nvm_pool, &p_queued, &f_queued);
     storage_cmd_t cmd_queued = {
         .block_id = 251,
@@ -333,7 +333,7 @@ int main(void)
     cmd_queue_push(&s_cmd_queue, &cmd_queued);
     printf("[Task T_A] Enqueued Block #251 behind Block #250 with 10 ms deadline...\n");
 
-    storage_result_t res_queued;
+    storage_result_t res_queued = {0};
     int32_t err_queued = 0;
     if (!cfuture_wait_for(&f_queued, 10, &res_queued, &err_queued))
     {
@@ -348,18 +348,18 @@ int main(void)
      * Scenario 3: Asynchronous Hardware DMA / ISR Completion
      * ----------------------------------------------------------------- */
     printf("\n--- [Scenario 3: Asynchronous Hardware DMA / ISR Safety] ---\n");
-    cpromise_t p_dma;
-    cfuture_t f_dma;
+    cpromise_t p_dma = {.slot_id = CFUTURE_INVALID_SLOT, .pool = NULL};
+    cfuture_t f_dma = {.slot_id = CFUTURE_INVALID_SLOT, .pool = NULL};
     if (cfuture_create(&s_nvm_pool, &p_dma, &f_dma))
     {
         printf("[Task T_A] Triggering hardware DMA transfer (Slot %u)... Waiting for ISR "
                "callback...\n",
                f_dma.slot_id);
 
-        pthread_t isr_thread;
+        pthread_t isr_thread = 0;
         pthread_create(&isr_thread, NULL, simulated_dma_isr_thread, &p_dma);
 
-        storage_result_t dma_out;
+        storage_result_t dma_out = {0};
         int32_t dma_err = 0;
         if (cfuture_wait_for(&f_dma, 100, &dma_out, &dma_err))
         {

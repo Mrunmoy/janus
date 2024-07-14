@@ -29,8 +29,8 @@ class IsrSafetyTest : public ::testing::Test
 
 TEST_F(IsrSafetyTest, IsrFulfill_InvokesIsrSyncHookAndDeliversPayload)
 {
-    cpromise_t promise;
-    cfuture_t future;
+    cpromise_t promise{};
+    cfuture_t future{};
 
     ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
 
@@ -47,13 +47,13 @@ TEST_F(IsrSafetyTest, IsrFulfill_InvokesIsrSyncHookAndDeliversPayload)
 
     EXPECT_EQ(out_val, isr_data);
     EXPECT_EQ(err, 0);
-    EXPECT_EQ(pool.allocated_mask.load(), 0U);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
 }
 
 TEST_F(IsrSafetyTest, IsrDrop_InvokesIsrSyncHookAndPropagatesError)
 {
-    cpromise_t promise;
-    cfuture_t future;
+    cpromise_t promise{};
+    cfuture_t future{};
 
     ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
 
@@ -65,13 +65,13 @@ TEST_F(IsrSafetyTest, IsrDrop_InvokesIsrSyncHookAndPropagatesError)
     int32_t out_err = 0;
     EXPECT_FALSE(cfuture_wait_for(&future, 50, nullptr, &out_err));
     EXPECT_EQ(out_err, isr_error_code);
-    EXPECT_EQ(pool.allocated_mask.load(), 0U);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
 }
 
 TEST_F(IsrSafetyTest, IsrFulfill_AfterCallerTimeout_SafelyRecyclesSlot)
 {
-    cpromise_t promise;
-    cfuture_t future;
+    cpromise_t promise{};
+    cfuture_t future{};
 
     ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
 
@@ -81,14 +81,15 @@ TEST_F(IsrSafetyTest, IsrFulfill_AfterCallerTimeout_SafelyRecyclesSlot)
     EXPECT_EQ(err, CFUTURE_ERR_TIMEOUT);
 
     // Caller dropped ref -> refcount is 1
-    EXPECT_EQ(pool.slots[0].ref_count.load(), 1U);
+    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_acquire), 1U);
 
     // Hardware ISR fires late
     uint32_t isr_data = 0x12345678;
     cpromise_set_value_from_isr(&promise, &isr_data, 0);
 
     // ISR recycles slot
-    EXPECT_EQ(pool.slots[0].ref_count.load(), 0U);
-    EXPECT_EQ(pool.slots[0].state.load(), (uint_fast32_t)CFUTURE_STATE_IDLE);
-    EXPECT_EQ(pool.allocated_mask.load(), 0U);
+    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_acquire), 0U);
+    EXPECT_EQ(pool.slots[0].state.load(std::memory_order_acquire),
+              (uint_fast32_t)CFUTURE_STATE_IDLE);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
 }

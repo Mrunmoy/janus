@@ -55,7 +55,7 @@ static void cfuture_posix_ensure_init(void)
  */
 static struct timespec cfuture_posix_calc_deadline(uint32_t timeout_ms)
 {
-    struct timespec ts;
+    struct timespec ts = {0};
     clock_gettime(CLOCK_REALTIME, &ts);
 
     ts.tv_sec += (time_t)(timeout_ms / 1000U);

@@ -35,38 +35,38 @@ class ThreadSafeChannel
   public:
     void push(cfuture_t f)
     {
-        std::unique_lock<std::mutex> lock(mtx_);
-        items_.push_back(f);
-        cv_.notify_one();
+        std::unique_lock<std::mutex> lock(m_mtx);
+        m_items.push_back(f);
+        m_cv.notify_one();
     }
 
     bool pop(cfuture_t &out_f)
     {
-        std::unique_lock<std::mutex> lock(mtx_);
-        cv_.wait(lock, [this] { return !items_.empty() || closed_; });
+        std::unique_lock<std::mutex> lock(m_mtx);
+        m_cv.wait(lock, [this] { return !m_items.empty() || m_closed; });
 
-        if (items_.empty())
+        if (m_items.empty())
         {
             return false;
         }
 
-        out_f = items_.front();
-        items_.pop_front();
+        out_f = m_items.front();
+        m_items.pop_front();
         return true;
     }
 
     void close()
     {
-        std::unique_lock<std::mutex> lock(mtx_);
-        closed_ = true;
-        cv_.notify_all();
+        std::unique_lock<std::mutex> lock(m_mtx);
+        m_closed = true;
+        m_cv.notify_all();
     }
 
   private:
-    std::mutex mtx_;
-    std::condition_variable cv_;
-    std::deque<cfuture_t> items_;
-    bool closed_{false};
+    std::mutex m_mtx;
+    std::condition_variable m_cv;
+    std::deque<cfuture_t> m_items;
+    bool m_closed{false};
 };
 
 } // namespace
@@ -77,13 +77,13 @@ class ConcurrencyStressTest : public ::testing::Test
     void SetUp() override
     {
         const cfuture_sync_ops_t *posix_ops = cfuture_posix_sync_ops();
-        ASSERT_TRUE(
-            cfuture_pool_init(&pool, kCapacity, sizeof(Payload), slots, payload_arena, posix_ops));
+        ASSERT_TRUE(cfuture_pool_init(&m_pool, kCapacity, sizeof(Payload), m_slots, m_payload_arena,
+                                      posix_ops));
     }
 
     void TearDown() override
     {
-        cfuture_pool_destroy(&pool);
+        cfuture_pool_destroy(&m_pool);
     }
 
     static constexpr uint32_t kCapacity = 32;
@@ -91,9 +91,9 @@ class ConcurrencyStressTest : public ::testing::Test
     static constexpr uint32_t kNumProducers = 4;
     static constexpr uint32_t kNumConsumers = 4;
 
-    cfuture_slot_t slots[kCapacity];
-    uint8_t payload_arena[kCapacity * sizeof(Payload)];
-    cfuture_pool_t pool;
+    cfuture_slot_t m_slots[kCapacity];
+    uint8_t m_payload_arena[kCapacity * sizeof(Payload)];
+    cfuture_pool_t m_pool;
 };
 
 TEST_F(ConcurrencyStressTest, ConcurrentCreateFulfillConsumeCycles)
@@ -116,7 +116,7 @@ TEST_F(ConcurrencyStressTest, ConcurrentCreateFulfillConsumeCycles)
         consumers.emplace_back(
             [&channel, &completed_cycles, &dropped_cycles, &timeout_cycles]()
             {
-                cfuture_t f;
+                cfuture_t f{};
                 while (channel.pop(f))
                 {
                     Payload rx{};
@@ -151,10 +151,10 @@ TEST_F(ConcurrencyStressTest, ConcurrentCreateFulfillConsumeCycles)
                 uint32_t seq = 0;
                 while (total_created.fetch_add(1, std::memory_order_relaxed) < kTotalCycles)
                 {
-                    cpromise_t p;
-                    cfuture_t f;
+                    cpromise_t p{};
+                    cfuture_t f{};
 
-                    while (!cfuture_create(&pool, &p, &f))
+                    while (!cfuture_create(&m_pool, &p, &f))
                     {
                         std::this_thread::yield();
                     }
@@ -198,11 +198,14 @@ TEST_F(ConcurrencyStressTest, ConcurrentCreateFulfillConsumeCycles)
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     // Zero memory leaks: All slots must be back in IDLE with ref_count == 0
-    EXPECT_EQ(pool.allocated_mask.load(), 0U);
+    // Relaxed is sufficient here: all producer/consumer threads have already
+    // been joined above, which establishes happens-before with this thread.
+    EXPECT_EQ(m_pool.allocated_mask.load(std::memory_order_relaxed), 0U);
 
     for (uint32_t i = 0; i < kCapacity; ++i)
     {
-        EXPECT_EQ(pool.slots[i].ref_count.load(), 0U);
-        EXPECT_EQ(pool.slots[i].state.load(), (uint_fast32_t)CFUTURE_STATE_IDLE);
+        EXPECT_EQ(m_pool.slots[i].ref_count.load(std::memory_order_relaxed), 0U);
+        EXPECT_EQ(m_pool.slots[i].state.load(std::memory_order_relaxed),
+                  (uint_fast32_t)CFUTURE_STATE_IDLE);
     }
 }
