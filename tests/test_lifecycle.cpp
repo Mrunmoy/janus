@@ -9,8 +9,7 @@ class LifecycleTest : public ::testing::Test
     void SetUp() override
     {
         cfuture::testing::MockSyncController::instance().reset();
-        cfuture_sync_ops_t sync_ops =
-            cfuture::testing::MockSyncController::instance().get_sync_ops();
+        cfuture_sync_ops_t sync_ops = cfuture::testing::MockSyncController::instance().getSyncOps();
         ASSERT_TRUE(
             cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
     }
@@ -161,7 +160,7 @@ TEST_F(LifecycleTest, ZeroPayloadFuture)
 {
     cfuture_slot_t zero_slots[2]{};
     cfuture_pool_t zero_pool{};
-    cfuture_sync_ops_t sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
+    cfuture_sync_ops_t sync_ops = cfuture::testing::MockSyncController::instance().getSyncOps();
     ASSERT_TRUE(cfuture_pool_init(&zero_pool, 2, 0, zero_slots, nullptr, &sync_ops));
 
     cpromise_t p{};
@@ -191,7 +190,7 @@ TEST_F(LifecycleTest, StructPayloadIntegrity)
     cfuture_slot_t struct_slots[2]{};
     uint8_t arena[2 * sizeof(SensorReading)]{};
     cfuture_pool_t struct_pool{};
-    cfuture_sync_ops_t sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
+    cfuture_sync_ops_t sync_ops = cfuture::testing::MockSyncController::instance().getSyncOps();
     ASSERT_TRUE(
         cfuture_pool_init(&struct_pool, 2, sizeof(SensorReading), struct_slots, arena, &sync_ops));
 
