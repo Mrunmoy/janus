@@ -1,6 +1,6 @@
 # Master Implementation Plan: Unified Multi-RTOS STM32F407 USB Storage Showcase
 
-> **Target Audience**: Claude Code / Autonomous Embedded Firmware Agent  
+> **Target Audience**: Autonomous Embedded Firmware Developer / Engineer  
 > **Repository Type**: Single-Branch Unified Multi-Target Hardware Showcase Repository  
 > **Core Dependency**: `janus` (`libcfuture`) as a Git submodule at `external/cfuture`  
 > **Target Hardware**: STM32F407ZGT6 Development Board (ARM Cortex-M4F @ 168 MHz) + USB OTG FS Host  
@@ -122,7 +122,7 @@ def main():
 
 ---
 
-## 5. Step-by-Step Task Breakdown for Claude Code
+## 5. Step-by-Step Task Breakdown
 
 ### Phase 1: Repository Skeleton & Common Abstractions
 - **Task 1.1**: Initialize git repo and add `janus` submodule:
@@ -182,7 +182,7 @@ def main():
 
 ---
 
-## 6. Acceptance Criteria for Claude Code
+## 6. Acceptance Criteria
 
 1. **Host Builds & Runs Instantly Out-of-the-Box**:
    ```bash
