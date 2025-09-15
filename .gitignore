@@ -31,9 +31,10 @@ result
 result-*
 .direnv/
 
-# IDE and editor files
+# IDE, editor, and developer files
 .vscode/
 .idea/
 *.swp
 *~
 .clangd/
+CLAUDE.md
