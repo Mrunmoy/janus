@@ -15,7 +15,6 @@
 
 #ifdef __cplusplus
 #include <atomic>
-#include <cstdbool>
 #include <cstddef>
 #include <cstdint>
 typedef std::atomic<uint_fast32_t> cfuture_atomic_uint_fast32_t;
