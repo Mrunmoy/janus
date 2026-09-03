@@ -21,12 +21,12 @@ extern "C"
 /** Maximum concurrent polling events supported in the static pool. */
 #define CFUTURE_POLL_MAX_EVENTS ((uint32_t)64U)
 
-/**
- * @brief Returns the singleton bare-metal polling synchronization operations table.
- *
- * @return Pointer to static cfuture_sync_ops_t structure.
- */
-const cfuture_sync_ops_t *cfuture_polling_sync_ops(void);
+    /**
+     * @brief Returns the singleton bare-metal polling synchronization operations table.
+     *
+     * @return Pointer to static cfuture_sync_ops_t structure.
+     */
+    const cfuture_sync_ops_t *cfuture_polling_sync_ops(void);
 
 #ifdef __cplusplus
 }

@@ -13,27 +13,13 @@ ColumnLimit: 100
 PointerAlignment: Right
 ReferenceAlignment: Right
 
-# Braces and layout
-BreakBeforeBraces: Custom
-BraceWrapping:
-  AfterCaseLabel: false
-  AfterClass: false
-  AfterControlStatement: false
-  AfterEnum: false
-  AfterFunction: true
-  AfterNamespace: false
-  AfterStruct: false
-  AfterUnion: false
-  BeforeCatch: false
-  BeforeElse: false
-  IndentBraces: false
-  SplitEmptyFunction: true
-  SplitEmptyRecord: true
-  SplitEmptyNamespace: true
+# Braces on next line for all blocks (Allman style)
+BreakBeforeBraces: Allman
 
-AllowShortFunctionsOnASingleLine: Inline
+AllowShortFunctionsOnASingleLine: None
 AllowShortIfStatementsOnASingleLine: false
 AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: false
 
 SpaceAfterCStyleCast: false
 SpaceBeforeParens: ControlStatements
