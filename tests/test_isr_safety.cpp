@@ -3,15 +3,19 @@
 
 #include <gtest/gtest.h>
 
-class IsrSafetyTest : public ::testing::Test {
-protected:
-    void SetUp() override {
+class IsrSafetyTest : public ::testing::Test
+{
+  protected:
+    void SetUp() override
+    {
         cfuture::testing::MockSyncController::instance().reset();
         auto sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
-        ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
+        ASSERT_TRUE(
+            cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
     }
 
-    void TearDown() override {
+    void TearDown() override
+    {
         cfuture_pool_destroy(&pool);
     }
 
@@ -23,7 +27,8 @@ protected:
     cfuture_pool_t pool;
 };
 
-TEST_F(IsrSafetyTest, IsrFulfill_InvokesIsrSyncHookAndDeliversPayload) {
+TEST_F(IsrSafetyTest, IsrFulfill_InvokesIsrSyncHookAndDeliversPayload)
+{
     cpromise_t promise;
     cfuture_t future;
 
@@ -45,7 +50,8 @@ TEST_F(IsrSafetyTest, IsrFulfill_InvokesIsrSyncHookAndDeliversPayload) {
     EXPECT_EQ(pool.allocated_mask.load(), 0U);
 }
 
-TEST_F(IsrSafetyTest, IsrDrop_InvokesIsrSyncHookAndPropagatesError) {
+TEST_F(IsrSafetyTest, IsrDrop_InvokesIsrSyncHookAndPropagatesError)
+{
     cpromise_t promise;
     cfuture_t future;
 
@@ -62,7 +68,8 @@ TEST_F(IsrSafetyTest, IsrDrop_InvokesIsrSyncHookAndPropagatesError) {
     EXPECT_EQ(pool.allocated_mask.load(), 0U);
 }
 
-TEST_F(IsrSafetyTest, IsrFulfill_AfterCallerTimeout_SafelyRecyclesSlot) {
+TEST_F(IsrSafetyTest, IsrFulfill_AfterCallerTimeout_SafelyRecyclesSlot)
+{
     cpromise_t promise;
     cfuture_t future;
 

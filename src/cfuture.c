@@ -210,7 +210,7 @@ static void cpromise_drop_impl(cpromise_t *promise, int32_t error_code, bool fro
 static bool cfuture_consume_result(cfuture_pool_t *pool, uint8_t slot_id, uint_fast32_t state,
                                    void *out_payload, int32_t *out_error)
 {
-    cfuture_slot_t *slot = &pool->slots[slot_id];
+    const cfuture_slot_t *slot = &pool->slots[slot_id];
 
     if (state == (uint_fast32_t)CFUTURE_STATE_COMPLETED)
     {
@@ -382,8 +382,7 @@ void cpromise_drop_from_isr(cpromise_t *promise, int32_t error_code)
     cpromise_drop_impl(promise, error_code, true);
 }
 
-bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
-                      int32_t *out_error)
+bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload, int32_t *out_error)
 {
     if (!future || !future->pool || future->slot_id >= future->pool->capacity)
     {
@@ -416,8 +415,7 @@ bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
             uint_fast32_t expected = (uint_fast32_t)CFUTURE_STATE_PENDING;
             if (atomic_compare_exchange_strong_explicit(&slot->state, &expected,
                                                         (uint_fast32_t)CFUTURE_STATE_TIMEOUT,
-                                                        memory_order_acq_rel,
-                                                        memory_order_acquire))
+                                                        memory_order_acq_rel, memory_order_acquire))
             {
                 if (out_error)
                 {
@@ -442,7 +440,7 @@ bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
     if (out_error)
     {
         *out_error = (st == (uint_fast32_t)CFUTURE_STATE_TIMEOUT) ? CFUTURE_ERR_TIMEOUT
-                                                                 : CFUTURE_ERR_ABANDONED;
+                                                                  : CFUTURE_ERR_ABANDONED;
     }
 
     cfuture_slot_release_ref(pool, slot_id);

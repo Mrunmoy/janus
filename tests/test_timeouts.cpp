@@ -5,15 +5,19 @@
 #include <gtest/gtest.h>
 #include <thread>
 
-class TimeoutsTest : public ::testing::Test {
-protected:
-    void SetUp() override {
+class TimeoutsTest : public ::testing::Test
+{
+  protected:
+    void SetUp() override
+    {
         cfuture::testing::MockSyncController::instance().reset();
         auto sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
-        ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
+        ASSERT_TRUE(
+            cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
     }
 
-    void TearDown() override {
+    void TearDown() override
+    {
         cfuture_pool_destroy(&pool);
     }
 
@@ -25,7 +29,8 @@ protected:
     cfuture_pool_t pool;
 };
 
-TEST_F(TimeoutsTest, NonBlockingZeroTimeout_ReturnsImmediatelyWhenPending) {
+TEST_F(TimeoutsTest, NonBlockingZeroTimeout_ReturnsImmediatelyWhenPending)
+{
     cpromise_t promise;
     cfuture_t future;
 
@@ -37,7 +42,8 @@ TEST_F(TimeoutsTest, NonBlockingZeroTimeout_ReturnsImmediatelyWhenPending) {
     auto t0 = std::chrono::steady_clock::now();
     bool ok = cfuture_wait_for(&future, 0, &out_val, &err);
     auto elapsed_us =
-        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
 
     EXPECT_FALSE(ok);
     EXPECT_EQ(err, CFUTURE_ERR_TIMEOUT);
@@ -57,22 +63,25 @@ TEST_F(TimeoutsTest, NonBlockingZeroTimeout_ReturnsImmediatelyWhenPending) {
     EXPECT_EQ(pool.allocated_mask.load(), 0U);
 }
 
-TEST_F(TimeoutsTest, TimedWait_WorkerStalls_CallerTimesOutAndUnwinds) {
+TEST_F(TimeoutsTest, TimedWait_WorkerStalls_CallerTimesOutAndUnwinds)
+{
     cpromise_t promise;
     cfuture_t future;
 
     ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
 
-    std::thread worker([&promise]() {
-        // Worker simulates slow hardware / peripheral response
-        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    std::thread worker(
+        [&promise]()
+        {
+            // Worker simulates slow hardware / peripheral response
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
 
-        // Caller should have timed out by now
-        EXPECT_FALSE(cpromise_is_active(&promise));
+            // Caller should have timed out by now
+            EXPECT_FALSE(cpromise_is_active(&promise));
 
-        uint32_t result = 999;
-        cpromise_set_value(&promise, &result, 0);
-    });
+            uint32_t result = 999;
+            cpromise_set_value(&promise, &result, 0);
+        });
 
     // Caller waits for 20 ms (well before worker completes at 60 ms)
     uint32_t out_val = 0;
@@ -81,7 +90,8 @@ TEST_F(TimeoutsTest, TimedWait_WorkerStalls_CallerTimesOutAndUnwinds) {
     auto t0 = std::chrono::steady_clock::now();
     bool ok = cfuture_wait_for(&future, 20, &out_val, &err);
     auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
 
     EXPECT_FALSE(ok);
     EXPECT_EQ(err, CFUTURE_ERR_TIMEOUT);
@@ -99,7 +109,8 @@ TEST_F(TimeoutsTest, TimedWait_WorkerStalls_CallerTimesOutAndUnwinds) {
     EXPECT_EQ(pool.allocated_mask.load(), 0U);
 }
 
-TEST_F(TimeoutsTest, ZeroTimeout_ReturnsSuccessIfAlreadyCompleted) {
+TEST_F(TimeoutsTest, ZeroTimeout_ReturnsSuccessIfAlreadyCompleted)
+{
     cpromise_t promise;
     cfuture_t future;
 

@@ -3,15 +3,19 @@
 
 #include <gtest/gtest.h>
 
-class LifecycleTest : public ::testing::Test {
-protected:
-    void SetUp() override {
+class LifecycleTest : public ::testing::Test
+{
+  protected:
+    void SetUp() override
+    {
         cfuture::testing::MockSyncController::instance().reset();
         auto sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
-        ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
+        ASSERT_TRUE(
+            cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
     }
 
-    void TearDown() override {
+    void TearDown() override
+    {
         cfuture_pool_destroy(&pool);
     }
 
@@ -23,7 +27,8 @@ protected:
     cfuture_pool_t pool;
 };
 
-TEST_F(LifecycleTest, CreateAndFulfill_NormalFlow) {
+TEST_F(LifecycleTest, CreateAndFulfill_NormalFlow)
+{
     cpromise_t promise;
     cfuture_t future;
 
@@ -59,12 +64,14 @@ TEST_F(LifecycleTest, CreateAndFulfill_NormalFlow) {
     EXPECT_EQ(pool.allocated_mask.load(), 0U);
 }
 
-TEST_F(LifecycleTest, SlotRecyclingAllowsReallocation) {
+TEST_F(LifecycleTest, SlotRecyclingAllowsReallocation)
+{
     // Fill all slots
     cpromise_t promises[kCapacity];
     cfuture_t futures[kCapacity];
 
-    for (uint32_t i = 0; i < kCapacity; ++i) {
+    for (uint32_t i = 0; i < kCapacity; ++i)
+    {
         ASSERT_TRUE(cfuture_create(&pool, &promises[i], &futures[i]));
     }
     EXPECT_FALSE(cfuture_create(&pool, &promises[0], &futures[0]));
@@ -86,11 +93,15 @@ TEST_F(LifecycleTest, SlotRecyclingAllowsReallocation) {
     EXPECT_EQ(new_f.slot_id, 2U);
 
     // Clean up remaining slots
-    for (uint32_t i = 0; i < kCapacity; ++i) {
-        if (i == 2) {
+    for (uint32_t i = 0; i < kCapacity; ++i)
+    {
+        if (i == 2)
+        {
             cfuture_abandon(&new_f);
             cpromise_drop(&new_p, 0);
-        } else {
+        }
+        else
+        {
             cfuture_abandon(&futures[i]);
             cpromise_drop(&promises[i], 0);
         }
@@ -98,7 +109,8 @@ TEST_F(LifecycleTest, SlotRecyclingAllowsReallocation) {
     EXPECT_EQ(pool.allocated_mask.load(), 0U);
 }
 
-TEST_F(LifecycleTest, ProducerDropsPromise_PropagatesErrorCode) {
+TEST_F(LifecycleTest, ProducerDropsPromise_PropagatesErrorCode)
+{
     cpromise_t promise;
     cfuture_t future;
 
@@ -115,7 +127,8 @@ TEST_F(LifecycleTest, ProducerDropsPromise_PropagatesErrorCode) {
     EXPECT_EQ(pool.allocated_mask.load(), 0U);
 }
 
-TEST_F(LifecycleTest, ConsumerAbandonsFuture_WorkerRecyclesOnCompletion) {
+TEST_F(LifecycleTest, ConsumerAbandonsFuture_WorkerRecyclesOnCompletion)
+{
     cpromise_t promise;
     cfuture_t future;
 
@@ -140,7 +153,8 @@ TEST_F(LifecycleTest, ConsumerAbandonsFuture_WorkerRecyclesOnCompletion) {
     EXPECT_EQ(pool.allocated_mask.load(), 0U);
 }
 
-TEST_F(LifecycleTest, ZeroPayloadFuture) {
+TEST_F(LifecycleTest, ZeroPayloadFuture)
+{
     cfuture_slot_t zero_slots[2];
     cfuture_pool_t zero_pool;
     auto sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
@@ -160,19 +174,22 @@ TEST_F(LifecycleTest, ZeroPayloadFuture) {
     cfuture_pool_destroy(&zero_pool);
 }
 
-struct SensorReading {
+struct SensorReading
+{
     float temperature;
     float humidity;
     uint32_t timestamp;
     uint8_t flags;
 };
 
-TEST_F(LifecycleTest, StructPayloadIntegrity) {
+TEST_F(LifecycleTest, StructPayloadIntegrity)
+{
     cfuture_slot_t struct_slots[2];
     uint8_t arena[2 * sizeof(SensorReading)];
     cfuture_pool_t struct_pool;
     auto sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
-    ASSERT_TRUE(cfuture_pool_init(&struct_pool, 2, sizeof(SensorReading), struct_slots, arena, &sync_ops));
+    ASSERT_TRUE(
+        cfuture_pool_init(&struct_pool, 2, sizeof(SensorReading), struct_slots, arena, &sync_ops));
 
     cpromise_t p;
     cfuture_t f;
@@ -195,7 +212,8 @@ TEST_F(LifecycleTest, StructPayloadIntegrity) {
     cfuture_pool_destroy(&struct_pool);
 }
 
-TEST_F(LifecycleTest, WaitRejectsNullOrInvalidFuture) {
+TEST_F(LifecycleTest, WaitRejectsNullOrInvalidFuture)
+{
     int32_t err = 0;
     EXPECT_FALSE(cfuture_wait_for(nullptr, 10, nullptr, &err));
     EXPECT_EQ(err, CFUTURE_ERR_INVALID);
