@@ -43,12 +43,12 @@ class MockSyncController
 
     void reset()
     {
-        create_count.store(0);
-        destroy_count.store(0);
-        fail_create_after.store(UINT32_MAX);
-        force_create_failure.store(false);
-        spurious_wakeups.store(false);
-        fail_wait.store(false);
+        create_count.store(0, std::memory_order_relaxed);
+        destroy_count.store(0, std::memory_order_relaxed);
+        fail_create_after.store(UINT32_MAX, std::memory_order_relaxed);
+        force_create_failure.store(false, std::memory_order_relaxed);
+        spurious_wakeups.store(false, std::memory_order_relaxed);
+        fail_wait.store(false, std::memory_order_relaxed);
 
         for (size_t i = 0; i < kMaxEvents; ++i)
         {
@@ -58,12 +58,12 @@ class MockSyncController
             events[i].reset_count = 0;
             events[i].isr_set_count = 0;
         }
-        next_event_idx.store(0);
+        next_event_idx.store(0, std::memory_order_relaxed);
     }
 
-    static void *mock_event_create()
+    static void *mockEventCreate()
     {
-        auto &self = instance();
+        MockSyncController &self = instance();
         if (self.force_create_failure.load(std::memory_order_relaxed))
         {
             return nullptr;
@@ -84,43 +84,43 @@ class MockSyncController
         return nullptr;
     }
 
-    static void mock_event_destroy(void *handle)
+    static void mockEventDestroy(void *handle)
     {
         if (!handle)
         {
             return;
         }
-        auto &self = instance();
+        MockSyncController &self = instance();
         self.destroy_count.fetch_add(1, std::memory_order_relaxed);
     }
 
-    static void mock_event_set(void *handle)
+    static void mockEventSet(void *handle)
     {
         if (!handle)
         {
             return;
         }
-        auto *ev = static_cast<MockEvent *>(handle);
+        MockEvent *ev = static_cast<MockEvent *>(handle);
         std::lock_guard<std::mutex> lock(ev->mtx);
         ev->signaled = true;
         ev->set_count++;
         ev->cv.notify_all();
     }
 
-    static bool mock_event_wait(void *handle, uint32_t timeout_ms)
+    [[nodiscard]] static bool mockEventWait(void *handle, uint32_t timeout_ms)
     {
         if (!handle)
         {
             return false;
         }
 
-        auto &self = instance();
+        MockSyncController &self = instance();
         if (self.fail_wait.load(std::memory_order_relaxed))
         {
             return false;
         }
 
-        auto *ev = static_cast<MockEvent *>(handle);
+        MockEvent *ev = static_cast<MockEvent *>(handle);
         std::unique_lock<std::mutex> lock(ev->mtx);
         ev->wait_count++;
 
@@ -149,25 +149,25 @@ class MockSyncController
                                [&] { return ev->signaled; });
     }
 
-    static void mock_event_reset(void *handle)
+    static void mockEventReset(void *handle)
     {
         if (!handle)
         {
             return;
         }
-        auto *ev = static_cast<MockEvent *>(handle);
+        MockEvent *ev = static_cast<MockEvent *>(handle);
         std::lock_guard<std::mutex> lock(ev->mtx);
         ev->signaled = false;
         ev->reset_count++;
     }
 
-    static void mock_event_set_from_isr(void *handle)
+    static void mockEventSetFromIsr(void *handle)
     {
         if (!handle)
         {
             return;
         }
-        auto *ev = static_cast<MockEvent *>(handle);
+        MockEvent *ev = static_cast<MockEvent *>(handle);
         std::lock_guard<std::mutex> lock(ev->mtx);
         ev->signaled = true;
         ev->isr_set_count++;
@@ -176,13 +176,13 @@ class MockSyncController
 
     cfuture_sync_ops_t get_sync_ops()
     {
-        cfuture_sync_ops_t ops;
-        ops.event_create = &MockSyncController::mock_event_create;
-        ops.event_destroy = &MockSyncController::mock_event_destroy;
-        ops.event_set = &MockSyncController::mock_event_set;
-        ops.event_wait = &MockSyncController::mock_event_wait;
-        ops.event_reset = &MockSyncController::mock_event_reset;
-        ops.event_set_from_isr = &MockSyncController::mock_event_set_from_isr;
+        cfuture_sync_ops_t ops{};
+        ops.event_create = &MockSyncController::mockEventCreate;
+        ops.event_destroy = &MockSyncController::mockEventDestroy;
+        ops.event_set = &MockSyncController::mockEventSet;
+        ops.event_wait = &MockSyncController::mockEventWait;
+        ops.event_reset = &MockSyncController::mockEventReset;
+        ops.event_set_from_isr = &MockSyncController::mockEventSetFromIsr;
         return ops;
     }
 

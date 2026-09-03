@@ -66,7 +66,7 @@ static inline uint_fast32_t cfuture_slot_release_ref(cfuture_pool_t *pool, uint8
  */
 static inline int cfuture_ctz32(uint32_t mask)
 {
-    unsigned long index;
+    unsigned long index = 0UL;
     _BitScanForward(&index, mask);
     return (int)index;
 }

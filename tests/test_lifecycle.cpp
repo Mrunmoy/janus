@@ -9,7 +9,8 @@ class LifecycleTest : public ::testing::Test
     void SetUp() override
     {
         cfuture::testing::MockSyncController::instance().reset();
-        auto sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
+        cfuture_sync_ops_t sync_ops =
+            cfuture::testing::MockSyncController::instance().get_sync_ops();
         ASSERT_TRUE(
             cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
     }
@@ -29,12 +30,12 @@ class LifecycleTest : public ::testing::Test
 
 TEST_F(LifecycleTest, CreateAndFulfill_NormalFlow)
 {
-    cpromise_t promise;
-    cfuture_t future;
+    cpromise_t promise{};
+    cfuture_t future{};
 
     ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
     EXPECT_TRUE(cpromise_is_active(&promise));
-    EXPECT_EQ(pool.slots[0].ref_count.load(), 2U);
+    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_relaxed), 2U);
 
     uint32_t send_val = 0xDEADBEEF;
     cpromise_set_value(&promise, &send_val, 0);
@@ -44,8 +45,9 @@ TEST_F(LifecycleTest, CreateAndFulfill_NormalFlow)
     EXPECT_EQ(promise.slot_id, CFUTURE_INVALID_SLOT);
 
     // Producer dropped ref: refcount is now 1
-    EXPECT_EQ(pool.slots[0].ref_count.load(), 1U);
-    EXPECT_EQ(pool.slots[0].state.load(), (uint_fast32_t)CFUTURE_STATE_COMPLETED);
+    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_relaxed), 1U);
+    EXPECT_EQ(pool.slots[0].state.load(std::memory_order_relaxed),
+              (uint_fast32_t)CFUTURE_STATE_COMPLETED);
 
     uint32_t recv_val = 0;
     int32_t err = -999;
@@ -59,16 +61,17 @@ TEST_F(LifecycleTest, CreateAndFulfill_NormalFlow)
     EXPECT_EQ(future.slot_id, CFUTURE_INVALID_SLOT);
 
     // Both parties released: slot recycled to pool
-    EXPECT_EQ(pool.slots[0].ref_count.load(), 0U);
-    EXPECT_EQ(pool.slots[0].state.load(), (uint_fast32_t)CFUTURE_STATE_IDLE);
-    EXPECT_EQ(pool.allocated_mask.load(), 0U);
+    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_relaxed), 0U);
+    EXPECT_EQ(pool.slots[0].state.load(std::memory_order_relaxed),
+              (uint_fast32_t)CFUTURE_STATE_IDLE);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_relaxed), 0U);
 }
 
 TEST_F(LifecycleTest, SlotRecyclingAllowsReallocation)
 {
     // Fill all slots
-    cpromise_t promises[kCapacity];
-    cfuture_t futures[kCapacity];
+    cpromise_t promises[kCapacity]{};
+    cfuture_t futures[kCapacity]{};
 
     for (uint32_t i = 0; i < kCapacity; ++i)
     {
@@ -83,11 +86,11 @@ TEST_F(LifecycleTest, SlotRecyclingAllowsReallocation)
     EXPECT_TRUE(cfuture_wait_for(&futures[2], 50, &out_val, nullptr));
 
     // Slot 2 should be recycled: allocated_mask bit 2 should be 0
-    EXPECT_EQ((pool.allocated_mask.load() & (1U << 2)), 0U);
+    EXPECT_EQ((pool.allocated_mask.load(std::memory_order_relaxed) & (1U << 2)), 0U);
 
     // Re-allocating should now succeed and reuse slot 2
-    cpromise_t new_p;
-    cfuture_t new_f;
+    cpromise_t new_p{};
+    cfuture_t new_f{};
     ASSERT_TRUE(cfuture_create(&pool, &new_p, &new_f));
     EXPECT_EQ(new_p.slot_id, 2U);
     EXPECT_EQ(new_f.slot_id, 2U);
@@ -106,13 +109,13 @@ TEST_F(LifecycleTest, SlotRecyclingAllowsReallocation)
             cpromise_drop(&promises[i], 0);
         }
     }
-    EXPECT_EQ(pool.allocated_mask.load(), 0U);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_relaxed), 0U);
 }
 
 TEST_F(LifecycleTest, ProducerDropsPromise_PropagatesErrorCode)
 {
-    cpromise_t promise;
-    cfuture_t future;
+    cpromise_t promise{};
+    cfuture_t future{};
 
     ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
 
@@ -124,13 +127,13 @@ TEST_F(LifecycleTest, ProducerDropsPromise_PropagatesErrorCode)
     EXPECT_EQ(received_error, error_reason);
 
     // Slot properly recycled
-    EXPECT_EQ(pool.allocated_mask.load(), 0U);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_relaxed), 0U);
 }
 
 TEST_F(LifecycleTest, ConsumerAbandonsFuture_WorkerRecyclesOnCompletion)
 {
-    cpromise_t promise;
-    cfuture_t future;
+    cpromise_t promise{};
+    cfuture_t future{};
 
     ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
 
@@ -139,8 +142,9 @@ TEST_F(LifecycleTest, ConsumerAbandonsFuture_WorkerRecyclesOnCompletion)
     EXPECT_EQ(future.pool, nullptr);
 
     // Caller dropped ref: refcount is 1, state is ABANDONED
-    EXPECT_EQ(pool.slots[0].ref_count.load(), 1U);
-    EXPECT_EQ(pool.slots[0].state.load(), (uint_fast32_t)CFUTURE_STATE_ABANDONED);
+    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_relaxed), 1U);
+    EXPECT_EQ(pool.slots[0].state.load(std::memory_order_relaxed),
+              (uint_fast32_t)CFUTURE_STATE_ABANDONED);
 
     // Worker checks status: should be inactive
     EXPECT_FALSE(cpromise_is_active(&promise));
@@ -149,19 +153,19 @@ TEST_F(LifecycleTest, ConsumerAbandonsFuture_WorkerRecyclesOnCompletion)
     uint32_t val = 999;
     cpromise_set_value(&promise, &val, 0);
 
-    EXPECT_EQ(pool.slots[0].ref_count.load(), 0U);
-    EXPECT_EQ(pool.allocated_mask.load(), 0U);
+    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_relaxed), 0U);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_relaxed), 0U);
 }
 
 TEST_F(LifecycleTest, ZeroPayloadFuture)
 {
-    cfuture_slot_t zero_slots[2];
-    cfuture_pool_t zero_pool;
-    auto sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
+    cfuture_slot_t zero_slots[2]{};
+    cfuture_pool_t zero_pool{};
+    cfuture_sync_ops_t sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
     ASSERT_TRUE(cfuture_pool_init(&zero_pool, 2, 0, zero_slots, nullptr, &sync_ops));
 
-    cpromise_t p;
-    cfuture_t f;
+    cpromise_t p{};
+    cfuture_t f{};
     ASSERT_TRUE(cfuture_create(&zero_pool, &p, &f));
 
     cpromise_set_value(&p, nullptr, 0);
@@ -169,7 +173,7 @@ TEST_F(LifecycleTest, ZeroPayloadFuture)
     int32_t err = -1;
     EXPECT_TRUE(cfuture_wait_for(&f, 100, nullptr, &err));
     EXPECT_EQ(err, 0);
-    EXPECT_EQ(zero_pool.allocated_mask.load(), 0U);
+    EXPECT_EQ(zero_pool.allocated_mask.load(std::memory_order_relaxed), 0U);
 
     cfuture_pool_destroy(&zero_pool);
 }
@@ -184,15 +188,15 @@ struct SensorReading
 
 TEST_F(LifecycleTest, StructPayloadIntegrity)
 {
-    cfuture_slot_t struct_slots[2];
-    uint8_t arena[2 * sizeof(SensorReading)];
-    cfuture_pool_t struct_pool;
-    auto sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
+    cfuture_slot_t struct_slots[2]{};
+    uint8_t arena[2 * sizeof(SensorReading)]{};
+    cfuture_pool_t struct_pool{};
+    cfuture_sync_ops_t sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
     ASSERT_TRUE(
         cfuture_pool_init(&struct_pool, 2, sizeof(SensorReading), struct_slots, arena, &sync_ops));
 
-    cpromise_t p;
-    cfuture_t f;
+    cpromise_t p{};
+    cfuture_t f{};
     ASSERT_TRUE(cfuture_create(&struct_pool, &p, &f));
 
     SensorReading tx{24.5f, 60.2f, 12345678U, 0x07};
@@ -208,7 +212,7 @@ TEST_F(LifecycleTest, StructPayloadIntegrity)
     EXPECT_EQ(rx.timestamp, 12345678U);
     EXPECT_EQ(rx.flags, 0x07);
 
-    EXPECT_EQ(struct_pool.allocated_mask.load(), 0U);
+    EXPECT_EQ(struct_pool.allocated_mask.load(std::memory_order_relaxed), 0U);
     cfuture_pool_destroy(&struct_pool);
 }
 

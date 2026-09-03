@@ -35,8 +35,8 @@ class TypedPoolTest : public ::testing::Test
 
 TEST_F(TypedPoolTest, TypedCreateAndFulfill)
 {
-    Motor_promise_t promise;
-    Motor_future_t future;
+    Motor_promise_t promise{};
+    Motor_future_t future{};
 
     ASSERT_TRUE(Motor_create(&pool, &promise, &future));
     EXPECT_TRUE(Motor_promise_is_active(&promise));
@@ -53,13 +53,13 @@ TEST_F(TypedPoolTest, TypedCreateAndFulfill)
     EXPECT_EQ(rx.fault_code, 0);
     EXPECT_EQ(err, 0);
 
-    EXPECT_EQ(pool.allocated_mask.load(), 0U);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
 }
 
 TEST_F(TypedPoolTest, TypedDropPropagatesErrorCode)
 {
-    Motor_promise_t promise;
-    Motor_future_t future;
+    Motor_promise_t promise{};
+    Motor_future_t future{};
 
     ASSERT_TRUE(Motor_create(&pool, &promise, &future));
 
@@ -70,13 +70,13 @@ TEST_F(TypedPoolTest, TypedDropPropagatesErrorCode)
     EXPECT_FALSE(Motor_future_wait(&future, 100, &rx, &err));
     EXPECT_EQ(err, -42);
 
-    EXPECT_EQ(pool.allocated_mask.load(), 0U);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
 }
 
 TEST_F(TypedPoolTest, TypedAbandon)
 {
-    Motor_promise_t promise;
-    Motor_future_t future;
+    Motor_promise_t promise{};
+    Motor_future_t future{};
 
     ASSERT_TRUE(Motor_create(&pool, &promise, &future));
 
@@ -86,5 +86,5 @@ TEST_F(TypedPoolTest, TypedAbandon)
     MotorTelemetry tx{0.0f, 0.0f, 0};
     Motor_promise_set(&promise, &tx, 0);
 
-    EXPECT_EQ(pool.allocated_mask.load(), 0U);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
 }

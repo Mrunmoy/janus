@@ -19,9 +19,9 @@ int main()
     constexpr uint32_t kCapacity = 32;
     constexpr uint32_t kIterations = 100000;
 
-    cfuture_slot_t slots[kCapacity];
-    uint32_t payload_arena[kCapacity];
-    cfuture_pool_t pool;
+    cfuture_slot_t slots[kCapacity]{};
+    uint32_t payload_arena[kCapacity]{};
+    cfuture_pool_t pool{};
 
     const cfuture_sync_ops_t *posix_ops = cfuture_posix_sync_ops();
     if (!cfuture_pool_init(&pool, kCapacity, sizeof(uint32_t), slots,
@@ -37,12 +37,12 @@ int main()
 
     // 1. Benchmark: Pure Allocation & Immediate Release
     {
-        auto start = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
 
         for (uint32_t i = 0; i < kIterations; ++i)
         {
-            cpromise_t p;
-            cfuture_t f;
+            cpromise_t p{};
+            cfuture_t f{};
             if (cfuture_create(&pool, &p, &f))
             {
                 cfuture_abandon(&f);
@@ -50,8 +50,8 @@ int main()
             }
         }
 
-        auto end = std::chrono::steady_clock::now();
-        auto duration_ns =
+        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+        int64_t duration_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
         double ns_per_op = static_cast<double>(duration_ns) / kIterations;
         double ops_per_sec = (1e9 / ns_per_op);
@@ -62,12 +62,12 @@ int main()
 
     // 2. Benchmark: Full Synchronous Create -> Fulfill -> Wait -> Recycle Cycle
     {
-        auto start = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
 
         for (uint32_t i = 0; i < kIterations; ++i)
         {
-            cpromise_t p;
-            cfuture_t f;
+            cpromise_t p{};
+            cfuture_t f{};
             if (cfuture_create(&pool, &p, &f))
             {
                 uint32_t val = i;
@@ -78,8 +78,8 @@ int main()
             }
         }
 
-        auto end = std::chrono::steady_clock::now();
-        auto duration_ns =
+        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+        int64_t duration_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
         double ns_per_op = static_cast<double>(duration_ns) / kIterations;
         double ops_per_sec = (1e9 / ns_per_op);

@@ -195,33 +195,25 @@ bool write_sector_safe(uint32_t block, storage_result_t *out_result)
 }
 ```
 
-    cfuture_pool_destroy(&s_sensor_pool);
-    return 0;
-}
-```
+### 2. Windows (MSVC / Visual Studio / MinGW)
 
-    ## #2. Windows(MSVC / Visual Studio / MinGW)
-
-        On Windows,
-    use the native Win32 Event adapter(`adapters / cfuture_win32.h`)
-    :
+On Windows, use the native Win32 Event adapter (`adapters/cfuture_win32.h`):
 
 ```c
-#include "adapters/cfuture_win32.h"
 #include "cfuture.h"
-
+#include "adapters/cfuture_win32.h"
 #include <stdio.h>
 
 #define POOL_CAPACITY 8U
 
-      CFUTURE_DEFINE_STATIC_BUFFERS(s_win_slots, POOL_CAPACITY, sizeof(uint32_t));
+CFUTURE_DEFINE_STATIC_BUFFERS(s_win_slots, POOL_CAPACITY, sizeof(uint32_t));
 static cfuture_pool_t s_win_pool;
 
 int main(void)
 {
     const cfuture_sync_ops_t *sync_ops = cfuture_win32_sync_ops();
-    cfuture_pool_init(&s_win_pool, POOL_CAPACITY, sizeof(uint32_t), s_win_slots_slots,
-                      s_win_slots_payload, sync_ops);
+    cfuture_pool_init(&s_win_pool, POOL_CAPACITY, sizeof(uint32_t),
+                      s_win_slots_slots, s_win_slots_payload, sync_ops);
 
     cpromise_t promise;
     cfuture_t future;
@@ -242,48 +234,13 @@ int main(void)
 }
 ```
 
-    ## #3. Eclipse /
-    Azure RTOS ThreadX
+### 3. Type-Safe Macro Interface (No `void *` Casts)
 
-        ThreadX event flags groups(`TX_EVENT_FLAGS_GROUP`) are supported via `adapters
-    /
-    cfuture_threadx.h`:
+Define subsystem-specific typed wrappers in your headers with a single macro call:
 
 ```c
-#include "adapters/cfuture_threadx.h"
-#include "cfuture.h"
-
-#define POOL_CAPACITY 8U
-    CFUTURE_DEFINE_THREADX_EVENTS(s_tx, POOL_CAPACITY);
-CFUTURE_DEFINE_STATIC_BUFFERS(s_tx_pool_buf, POOL_CAPACITY, sizeof(sensor_data_t));
-static cfuture_pool_t s_tx_pool;
-
-void thread_entry(ULONG param)
-{
-    cfuture_sync_ops_t tx_ops = {
-        .event_create = NULL, // Statically initialized
-        .event_set = cfuture_threadx_event_set,
-        .event_wait = cfuture_threadx_event_wait,
-        .event_reset = cfuture_threadx_event_reset,
-        .event_set_from_isr = cfuture_threadx_event_set_from_isr,
-    };
-    // ...
-}
-```
-
-    ## #4. Type -
-    Safe Macro Interface(No `void *` Casts)
-
-        Define subsystem
-    -
-    specific typed wrappers in your headers with a single macro call :
-
-```c
-    // In telemetry_service.h
-    typedef struct
-{
-    float pressure_bar;
-} pressure_data_t;
+// In telemetry_service.h
+typedef struct { float pressure_bar; } pressure_data_t;
 CFUTURE_DEFINE_TYPED_POOL(Sensor, pressure_data_t, 8)
 
 // In telemetry_service.c
@@ -291,7 +248,7 @@ Sensor_promise_t p;
 Sensor_future_t f;
 Sensor_create(&pool, &p, &f);
 
-pressure_data_t tx = {.pressure_bar = 1.013f};
+pressure_data_t tx = { .pressure_bar = 1.013f };
 Sensor_promise_set(&p, &tx, 0);
 
 pressure_data_t rx;
@@ -299,32 +256,32 @@ int32_t err = 0;
 Sensor_future_wait(&f, 50, &rx, &err);
 ```
 
-        -- -
+---
 
-        ##Microcontroller Porting Notes
+## Microcontroller Porting Notes
 
-        ## #STM32(Cortex - M3 / M4 / M7 / M33)
+### STM32 (Cortex-M3 / M4 / M7 / M33)
 
-        - **Cache &Memory Placement ** : Place `s_sensor_slots` and `s_sensor_payload` in non
-        - cacheable SRAM
-    or tightly - coupled memory(DTCM) using GCC attributes :
-  ```c __attribute__((section(".dtcmram"))) static cfuture_slot_t s_slots[8];
-__attribute__((section(".dtcmram"))) static uint8_t s_arena[8 * sizeof(packet_t)];
-``` - **L1 Cache Maintenance ** : If buffers are placed in normal cached AXI SRAM,
-    invalidate the caller's cache line after `cfuture_wait_for()` returns or clean before worker fulfillment:
-  ```c SCB_InvalidateDCache_by_Addr((uint32_t *)rx_buffer, sizeof(rx_buffer));
+- **Cache & Memory Placement**: Place `s_sensor_slots` and `s_sensor_payload` in non-cacheable SRAM or tightly-coupled memory (DTCM) using GCC attributes:
+  ```c
+  __attribute__((section(".dtcmram"))) static cfuture_slot_t s_slots[8];
+  __attribute__((section(".dtcmram"))) static uint8_t s_arena[8 * sizeof(packet_t)];
   ```
-- **Synchronization**: Inject FreeRTOS EventGroups (`adapters/cfuture_freertos.h`), Zephyr events (`adapters/cfuture_zephyr.h`), or ThreadX event flags (`adapters/cfuture_threadx.h`).
+- **L1 Cache Maintenance**: If buffers are placed in normal cached AXI SRAM, invalidate the caller's cache line after `cfuture_wait_for()` returns or clean before worker fulfillment:
+  ```c
+  SCB_InvalidateDCache_by_Addr((uint32_t *)rx_buffer, sizeof(rx_buffer));
+  ```
+- **Synchronization**: Inject your RTOS event primitives (FreeRTOS EventGroups, Zephyr events, ThreadX flags) via `cfuture_sync_ops_t`.
 
 ### ESP32 (Xtensa / RISC-V Dual-Core)
 
 - Compatible across SMP cores via atomic compare-and-swap.
-- Use `cfuture_freertos.h` for FreeRTOS EventGroup notifications across cores.
+- Inject FreeRTOS EventGroup notifications across cores via `cfuture_sync_ops_t`.
 
 ### Raspberry Pi Pico (RP2040 Cortex-M0+)
 
 - Cortex-M0+ lacks native hardware 64-bit atomic instructions. `cfuture.h` uses `uint_fast32_t` (`uint32_t` on 32-bit MCUs), which maps directly to native 32-bit atomic load/store/LDREX/STREX instructions.
-- Polling adapter (`cfuture_polling.h`) provides zero-dependency synchronization for bare-metal multi-core systems via hardware spinlocks.
+- Polling adapter (`adapters/cfuture_polling.h`) provides zero-dependency synchronization for bare-metal multi-core systems via hardware spinlocks.
 
 ---
 

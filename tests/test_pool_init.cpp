@@ -32,7 +32,7 @@ TEST_F(PoolInitTest, RejectsZeroCapacity)
 
 TEST_F(PoolInitTest, RejectsCapacityExceedingMaximum)
 {
-    cfuture_slot_t large_slots[CFUTURE_MAX_CAPACITY + 1];
+    cfuture_slot_t large_slots[CFUTURE_MAX_CAPACITY + 1]{};
     EXPECT_FALSE(
         cfuture_pool_init(&pool, CFUTURE_MAX_CAPACITY + 1, 0, large_slots, nullptr, nullptr));
 }
@@ -54,36 +54,41 @@ TEST_F(PoolInitTest, AcceptsZeroPayloadSizeWithNullPayloadBuffer)
     EXPECT_EQ(pool.capacity, kCapacity);
     EXPECT_EQ(pool.payload_size, 0U);
     EXPECT_EQ(pool.payload_arena, nullptr);
-    EXPECT_EQ(pool.allocated_mask.load(), 0U);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_relaxed), 0U);
 }
 
 TEST_F(PoolInitTest, InitializesSlotsAndInvokesEventCreate)
 {
-    auto sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
+    cfuture_sync_ops_t sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
     ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
 
-    EXPECT_EQ(cfuture::testing::MockSyncController::instance().create_count.load(), kCapacity);
+    EXPECT_EQ(cfuture::testing::MockSyncController::instance().create_count.load(
+                  std::memory_order_relaxed),
+              kCapacity);
 
     for (uint32_t i = 0; i < kCapacity; ++i)
     {
-        EXPECT_EQ(pool.slots[i].ref_count.load(), 0U);
-        EXPECT_EQ(pool.slots[i].state.load(), (uint_fast32_t)CFUTURE_STATE_IDLE);
+        EXPECT_EQ(pool.slots[i].ref_count.load(std::memory_order_relaxed), 0U);
+        EXPECT_EQ(pool.slots[i].state.load(std::memory_order_relaxed),
+                  (uint_fast32_t)CFUTURE_STATE_IDLE);
         EXPECT_EQ(pool.slots[i].error_code, 0);
         EXPECT_NE(pool.slots[i].event_handle, nullptr);
         EXPECT_EQ(pool.slots[i].payload, payload_arena + (i * kPayloadSize));
     }
 
     cfuture_pool_destroy(&pool);
-    EXPECT_EQ(cfuture::testing::MockSyncController::instance().destroy_count.load(), kCapacity);
+    EXPECT_EQ(cfuture::testing::MockSyncController::instance().destroy_count.load(
+                  std::memory_order_relaxed),
+              kCapacity);
 }
 
 TEST_F(PoolInitTest, CreateAllocatesSequentialSlotsUntilFull)
 {
-    auto sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
+    cfuture_sync_ops_t sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
     ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
 
-    cpromise_t promises[kCapacity];
-    cfuture_t futures[kCapacity];
+    cpromise_t promises[kCapacity]{};
+    cfuture_t futures[kCapacity]{};
 
     for (uint32_t i = 0; i < kCapacity; ++i)
     {
@@ -94,17 +99,18 @@ TEST_F(PoolInitTest, CreateAllocatesSequentialSlotsUntilFull)
         EXPECT_EQ(futures[i].pool, &pool);
 
         // Slot state should be PENDING, refcount 2
-        EXPECT_EQ(pool.slots[i].ref_count.load(), 2U);
-        EXPECT_EQ(pool.slots[i].state.load(), (uint_fast32_t)CFUTURE_STATE_PENDING);
+        EXPECT_EQ(pool.slots[i].ref_count.load(std::memory_order_relaxed), 2U);
+        EXPECT_EQ(pool.slots[i].state.load(std::memory_order_relaxed),
+                  (uint_fast32_t)CFUTURE_STATE_PENDING);
     }
 
     // Pool mask should be fully set for kCapacity bits
     uint32_t expected_mask = (1U << kCapacity) - 1U;
-    EXPECT_EQ(pool.allocated_mask.load(), expected_mask);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_relaxed), expected_mask);
 
     // Pool is now full, next allocation should fail
-    cpromise_t extra_promise;
-    cfuture_t extra_future;
+    cpromise_t extra_promise{};
+    cfuture_t extra_future{};
     EXPECT_FALSE(cfuture_create(&pool, &extra_promise, &extra_future));
 
     cfuture_pool_destroy(&pool);
@@ -114,8 +120,8 @@ TEST_F(PoolInitTest, CreateRejectsNullArguments)
 {
     ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, nullptr));
 
-    cpromise_t p;
-    cfuture_t f;
+    cpromise_t p{};
+    cfuture_t f{};
 
     EXPECT_FALSE(cfuture_create(nullptr, &p, &f));
     EXPECT_FALSE(cfuture_create(&pool, nullptr, &f));
