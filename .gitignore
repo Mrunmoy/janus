@@ -1,0 +1,39 @@
+# Build artifacts
+build/
+build_*/
+bin/
+lib/
+*.o
+*.a
+*.so
+*.dylib
+
+# CMake artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+
+# Coverage and profiling
+*.gcda
+*.gcno
+*.gcov
+coverage/
+*.info
+perf.data*
+gmon.out
+
+# Nix artifacts
+result
+result-*
+.direnv/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*~
+.clangd/
