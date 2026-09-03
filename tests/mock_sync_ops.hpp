@@ -174,7 +174,7 @@ class MockSyncController
         ev->cv.notify_all();
     }
 
-    cfuture_sync_ops_t get_sync_ops()
+    cfuture_sync_ops_t getSyncOps()
     {
         cfuture_sync_ops_t ops{};
         ops.event_create = &MockSyncController::mockEventCreate;

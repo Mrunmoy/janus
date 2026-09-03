@@ -9,7 +9,7 @@ class IsrSafetyTest : public ::testing::Test
     void SetUp() override
     {
         cfuture::testing::MockSyncController::instance().reset();
-        auto sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
+        auto sync_ops = cfuture::testing::MockSyncController::instance().getSyncOps();
         ASSERT_TRUE(
             cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
     }

@@ -59,7 +59,7 @@ TEST_F(PoolInitTest, AcceptsZeroPayloadSizeWithNullPayloadBuffer)
 
 TEST_F(PoolInitTest, InitializesSlotsAndInvokesEventCreate)
 {
-    cfuture_sync_ops_t sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
+    cfuture_sync_ops_t sync_ops = cfuture::testing::MockSyncController::instance().getSyncOps();
     ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
 
     EXPECT_EQ(cfuture::testing::MockSyncController::instance().create_count.load(
@@ -84,7 +84,7 @@ TEST_F(PoolInitTest, InitializesSlotsAndInvokesEventCreate)
 
 TEST_F(PoolInitTest, CreateAllocatesSequentialSlotsUntilFull)
 {
-    cfuture_sync_ops_t sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
+    cfuture_sync_ops_t sync_ops = cfuture::testing::MockSyncController::instance().getSyncOps();
     ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
 
     cpromise_t promises[kCapacity]{};

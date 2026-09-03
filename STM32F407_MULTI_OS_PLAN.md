@@ -14,7 +14,7 @@
 Instead of managing multiple git branches, this repository uses a **unified single-branch architecture**. All RTOS kernels live under `third_party/`, and the build system conditionally compiles the selected OSAL (Operating System Abstraction Layer) and PAL (Platform Abstraction Layer).
 
 ```
-stm32f407-cfuture-storage/
+stm32f407/
 ├── CMakeLists.txt              # Root build orchestrator (selects OSAL/PAL via -DTARGET_OS=...)
 ├── build.py                    # Unified CLI script (--os, --build, --flash, --stats, --clean)
 ├── README.md                   # Hardware setup, wiring, flashing, and quickstart guide

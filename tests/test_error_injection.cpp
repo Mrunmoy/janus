@@ -25,7 +25,7 @@ class ErrorInjectionTest : public ::testing::Test
     void SetUp() override
     {
         cfuture::testing::MockSyncController::instance().reset();
-        m_sync_ops = cfuture::testing::MockSyncController::instance().get_sync_ops();
+        m_sync_ops = cfuture::testing::MockSyncController::instance().getSyncOps();
     }
 
     void TearDown() override
