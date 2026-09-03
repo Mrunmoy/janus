@@ -177,14 +177,79 @@ int main(void)
 }
 ```
 
-### 2. Type-Safe Macro Interface (No `void *` Casts)
+### 2. Windows (MSVC / Visual Studio / MinGW)
+
+On Windows, use the native Win32 Event adapter (`adapters/cfuture_win32.h`):
+
+```c
+#include "cfuture.h"
+#include "adapters/cfuture_win32.h"
+#include <stdio.h>
+
+#define POOL_CAPACITY 8U
+
+CFUTURE_DEFINE_STATIC_BUFFERS(s_win_slots, POOL_CAPACITY, sizeof(uint32_t));
+static cfuture_pool_t s_win_pool;
+
+int main(void)
+{
+    const cfuture_sync_ops_t *sync_ops = cfuture_win32_sync_ops();
+    cfuture_pool_init(&s_win_pool, POOL_CAPACITY, sizeof(uint32_t),
+                      s_win_slots_slots, s_win_slots_payload, sync_ops);
+
+    cpromise_t promise;
+    cfuture_t future;
+    if (cfuture_create(&s_win_pool, &promise, &future))
+    {
+        uint32_t val = 42;
+        cpromise_set_value(&promise, &val, 0);
+
+        uint32_t result = 0;
+        if (cfuture_wait_for(&future, 100, &result, NULL))
+        {
+            printf("Received: %u\n", result);
+        }
+    }
+
+    cfuture_pool_destroy(&s_win_pool);
+    return 0;
+}
+```
+
+### 3. Eclipse / Azure RTOS ThreadX
+
+ThreadX event flags groups (`TX_EVENT_FLAGS_GROUP`) are supported via `adapters/cfuture_threadx.h`:
+
+```c
+#include "cfuture.h"
+#include "adapters/cfuture_threadx.h"
+
+#define POOL_CAPACITY 8U
+CFUTURE_DEFINE_THREADX_EVENTS(s_tx, POOL_CAPACITY);
+CFUTURE_DEFINE_STATIC_BUFFERS(s_tx_pool_buf, POOL_CAPACITY, sizeof(sensor_data_t));
+static cfuture_pool_t s_tx_pool;
+
+void thread_entry(ULONG param)
+{
+    cfuture_sync_ops_t tx_ops = {
+        .event_create = NULL, // Statically initialized
+        .event_set = cfuture_threadx_event_set,
+        .event_wait = cfuture_threadx_event_wait,
+        .event_reset = cfuture_threadx_event_reset,
+        .event_set_from_isr = cfuture_threadx_event_set_from_isr,
+    };
+    // ...
+}
+```
+
+### 4. Type-Safe Macro Interface (No `void *` Casts)
 
 Define subsystem-specific typed wrappers in your headers with a single macro call:
 
 ```c
 // In telemetry_service.h
 typedef struct { float pressure_bar; } pressure_data_t;
-CFUTURE_DEFINE_TYPED_POOL(Sensor, pressure_data_t)
+CFUTURE_DEFINE_TYPED_POOL(Sensor, pressure_data_t, 8)
 
 // In telemetry_service.c
 Sensor_promise_t p;
@@ -214,7 +279,7 @@ Sensor_future_wait(&f, 50, &rx, &err);
   ```c
   SCB_InvalidateDCache_by_Addr((uint32_t *)rx_buffer, sizeof(rx_buffer));
   ```
-- **Synchronization**: Inject FreeRTOS EventGroups (`adapters/cfuture_freertos.h`) or Zephyr events (`adapters/cfuture_zephyr.h`).
+- **Synchronization**: Inject FreeRTOS EventGroups (`adapters/cfuture_freertos.h`), Zephyr events (`adapters/cfuture_zephyr.h`), or ThreadX event flags (`adapters/cfuture_threadx.h`).
 
 ### ESP32 (Xtensa / RISC-V Dual-Core)
 
@@ -228,49 +293,55 @@ Sensor_future_wait(&f, 50, &rx, &err);
 
 ---
 
-## Building and Verification
+## Automation Script (`build.py`)
 
-### Using Nix (Recommended)
+A cross-platform Python CLI (`build.py`) is provided for Linux, macOS, and Windows:
+
+```bash
+# Run full quality pipeline (clean, build, tests, tsan, asan, stats, lint, bench)
+python3 build.py --all
+
+# Individual subcommands:
+python3 build.py --build       # Configure & build release library
+python3 build.py --test        # Run complete 7-suite unit test suite
+python3 build.py --tsan        # Run 100k cycle ThreadSanitizer suite
+python3 build.py --asan        # Run AddressSanitizer & UBSan suite
+python3 build.py --stats       # Check .text/.data/.bss size & verify 0 dynamic allocations
+python3 build.py --lint        # Run cppcheck and clang-format checks
+python3 build.py --bench       # Run throughput and latency benchmarks
+python3 build.py --soak 10     # Run hyper-speed soak test for 10 seconds
+python3 build.py --clean       # Remove all build directories
+```
+
+---
+
+## Hyper-Speed Soak & Overnight Stress Testing
+
+To verify absolute stability, zero bitmask leaks, and zero memory corruption under continuous high-load multi-threaded hammering:
+
+```bash
+# Quick 10-second soak test (~18 Million cycles)
+./build/benchmarks/bench_stress_soak --duration 10
+
+# 8-Hour Overnight soak run (~50+ Billion cycles)
+./build/benchmarks/bench_stress_soak --duration 28800
+
+# Target specific cycle count (e.g. 50,000,000 cycles)
+./build/benchmarks/bench_stress_soak --cycles 50000000
+```
+
+---
+
+## Building with CMake & Nix
+
+### Using Nix
 
 ```bash
 # Enter isolated hermetic development shell
 nix develop
 
-# Configure and build
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-
-# Run unit tests
-ctest --test-dir build --output-on-failure
-
-# Run micro-benchmarks
-./build/benchmarks/bench_throughput
-```
-
-### Sanitizer Suites
-
-```bash
-# ThreadSanitizer (100k multi-threaded stress test)
-cmake -B build_tsan -DCMAKE_BUILD_TYPE=Debug -DCFUTURE_ENABLE_TSAN=ON
-cmake --build build_tsan && ctest --test-dir build_tsan --output-on-failure
-
-# AddressSanitizer & UndefinedBehaviorSanitizer
-cmake -B build_asan -DCMAKE_BUILD_TYPE=Debug -DCFUTURE_ENABLE_ASAN=ON
-cmake --build build_asan && ctest --test-dir build_asan --output-on-failure
-
-# Code Coverage (lcov)
-cmake -B build_cov -DCMAKE_BUILD_TYPE=Debug -DCFUTURE_ENABLE_COVERAGE=ON
-cmake --build build_cov && ctest --test-dir build_cov
-```
-
-### Static Analysis & Formatting
-
-```bash
-# Verify Cppcheck zero warnings
-cppcheck --enable=all --suppress=missingIncludeSystem --suppress=unusedFunction --error-exitcode=1 -I include src/
-
-# Verify Allman formatting
-clang-format --dry-run --Werror src/*.c src/adapters/*.c include/*.h tests/*.cpp
+# Run full automated verification
+./build.py --all
 ```
 
 ---
@@ -278,3 +349,4 @@ clang-format --dry-run --Werror src/*.c src/adapters/*.c include/*.h tests/*.cpp
 ## License
 
 This project is licensed under the terms of the [MIT License](LICENSE).
+
