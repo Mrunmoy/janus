@@ -30,6 +30,9 @@ typedef atomic_uint_fast32_t cfuture_atomic_uint_fast32_t;
 #endif
 #endif
 
+#include "cfuture_osal.h"
+#include "cfuture_pal.h"
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -64,37 +67,18 @@ extern "C"
     } cfuture_state_t;
 
     /**
-     * @brief Pluggable OSAL synchronization interface table (Dependency Injection).
-     *
-     * Injects platform synchronization primitives (POSIX, FreeRTOS, Zephyr,
-     * or bare-metal polling) with zero #ifdefs in core logic.
-     */
-    typedef struct
-    {
-        /** Allocates/initializes a synchronization primitive. */
-        void *(*event_create)(void);
-        /** Destroys/releases a synchronization primitive. */
-        void (*event_destroy)(void *event_handle);
-        /** Signals the event from task context. */
-        void (*event_set)(void *event_handle);
-        /** Waits for the event to be signaled, with timeout in ms. Returns true if signaled. */
-        bool (*event_wait)(void *event_handle, uint32_t timeout_ms);
-        /** Resets the event to unsignaled state prior to slot reuse (optional, can be NULL). */
-        void (*event_reset)(void *event_handle);
-        /** Signals the event from ISR context (optional; falls back to event_set if NULL). */
-        void (*event_set_from_isr)(void *event_handle);
-    } cfuture_sync_ops_t;
-
-    /**
      * @brief Single slot metadata within the static future/promise pool.
+     *
+     * Lifecycle and dual-ownership are managed atomically via state alone:
+     * IDLE -> PENDING -> (COMPLETED | DROPPED | TIMEOUT | ABANDONED) -> IDLE.
+     * Whichever participant finishes second recycles the slot.
      */
     typedef struct
     {
-        cfuture_atomic_uint_fast32_t ref_count; /**< Dual-owner refcount: 2 -> 1 -> 0. */
-        cfuture_atomic_uint_fast32_t state;     /**< Current state (cfuture_state_t). */
-        int32_t error_code;                     /**< Result status / error code (0 = success). */
-        void *event_handle;                     /**< Injected OSAL synchronization handle. */
-        uint8_t *payload;                       /**< Pointer into pool payload arena. */
+        cfuture_atomic_uint_fast32_t state; /**< Atomic slot lifecycle state (cfuture_state_t). */
+        int32_t error_code;                 /**< Result status / error code (0 = success). */
+        void *event_handle;                 /**< Injected OSAL synchronization handle. */
+        uint8_t *payload;                   /**< Pointer into pool payload arena. */
     } cfuture_slot_t;
 
     /* Forward declaration of pool container. */
@@ -140,7 +124,8 @@ extern "C"
      * @param[in]  payload_size Size of result data per slot in bytes (can be 0).
      * @param[in]  slots_buf    User-provided buffer for cfuture_slot_t array [capacity].
      * @param[in]  payload_buf  User-provided buffer for payload arena [capacity * payload_size].
-     * @param[in]  sync_ops     Synchronization callbacks table (can be NULL for manual polling).
+     * @param[in]  sync_ops     Synchronization callbacks table (can be NULL for bare-metal PAL
+     * polling).
      * @return true on success, false if parameters are invalid.
      */
     bool cfuture_pool_init(cfuture_pool_t *pool, uint32_t capacity, size_t payload_size,

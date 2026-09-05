@@ -1,9 +1,12 @@
 /**
  * @file cfuture_polling.h
- * @brief Zero-Heap Bare-Metal Spin-Polling Synchronization Adapter
+ * @brief Bare-Metal Polling Synchronization Adapter
  *
- * Designed for bare-metal microcontrollers without an RTOS, or simple superloops.
- * Uses atomic flag polling with zero dynamic memory allocation.
+ * In libcfuture with PAL, passing NULL for sync_ops in cfuture_pool_init()
+ * automatically performs PAL-backed state polling with low-power CPU relax (__WFI()).
+ *
+ * This adapter is provided for backward compatibility with existing code expecting
+ * cfuture_polling_sync_ops().
  *
  * SPDX-License-Identifier: MIT
  */
@@ -18,11 +21,10 @@ extern "C"
 {
 #endif
 
-/** Maximum concurrent polling events supported in the static pool. */
-#define CFUTURE_POLL_MAX_EVENTS ((uint32_t)64U)
-
     /**
      * @brief Returns the singleton bare-metal polling synchronization operations table.
+     *
+     * Returns a sync_ops table configured for zero-allocation PAL polling.
      *
      * @return Pointer to static cfuture_sync_ops_t structure.
      */
