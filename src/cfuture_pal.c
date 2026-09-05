@@ -28,12 +28,18 @@ __attribute__((weak)) uint32_t cfuture_pal_time_ms(void)
     {
         return HAL_GetTick();
     }
-    return 0U;
+
+    /* Fallback monotonic counter when no hardware clock is linked:
+     * Advances each call so finite timeouts are guaranteed to terminate
+     * rather than hanging indefinitely on unfulfilled promises. */
+    static uint32_t s_fallback_tick = 0;
+    return ++s_fallback_tick;
 }
 
 __attribute__((weak)) void cfuture_pal_cpu_relax(void)
 {
-    __asm__ volatile("wfi");
+    /* ARM Thumb-2 YIELD hint: relaxes instruction pipeline without check-then-sleep race */
+    __asm__ volatile("yield" ::: "memory");
 }
 
 #elif defined(_WIN32) || defined(_WIN64)
