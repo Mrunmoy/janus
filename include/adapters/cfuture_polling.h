@@ -3,7 +3,7 @@
  * @brief Bare-Metal Polling Synchronization Adapter
  *
  * In libcfuture with PAL, passing NULL for sync_ops in cfuture_pool_init()
- * automatically performs PAL-backed state polling with low-power CPU relax (__WFI()).
+ * automatically performs PAL-backed state polling with CPU relax (Thumb-2 YIELD hint).
  *
  * This adapter is provided for backward compatibility with existing code expecting
  * cfuture_polling_sync_ops().

@@ -7,6 +7,21 @@
  * dangling stack pointers across message queues and guarantees immediate non-blocking
  * timeout unwinding.
  *
+ * Key guarantees:
+ * - Zero dynamic memory allocation (0 bytes malloc/free).
+ * - Compile-time static bounds: MAX_SLOTS capacity enforced via bitmask.
+ * - Lock-free, non-blocking single-slot acquisition via atomic CAS on bitmask.
+ * - Dual-owner reference tracking (2 -> 1 -> 0) preventing premature slot recycling
+ *   while the producer is signaling the consumer event.
+ * - Immediate non-blocking timeout unwinding: consumer marks TIMEOUT and exits
+ *   instantly without spinning or blocking; deferred slot recycling is safely
+ *   handled by the producer upon completion.
+ * - Asynchronous ISR safety: promises can be fulfilled directly from hardware
+ *   interrupt service routines via dedicated cpromise_*_from_isr() APIs.
+ * - Platform Abstraction Layer (PAL) for monotonic time and CPU relax hints.
+ * - Operating System Abstraction Layer (OSAL) for pluggable RTOS/Host synchronization.
+ * - Strict C11 / C++17 compatibility.
+ *
  * SPDX-License-Identifier: MIT
  */
 
@@ -68,17 +83,14 @@ extern "C"
 
     /**
      * @brief Single slot metadata within the static future/promise pool.
-     *
-     * Lifecycle and dual-ownership are managed atomically via state alone:
-     * IDLE -> PENDING -> (COMPLETED | DROPPED | TIMEOUT | ABANDONED) -> IDLE.
-     * Whichever participant finishes second recycles the slot.
      */
     typedef struct
     {
-        cfuture_atomic_uint_fast32_t state; /**< Atomic slot lifecycle state (cfuture_state_t). */
-        int32_t error_code;                 /**< Result status / error code (0 = success). */
-        void *event_handle;                 /**< Injected OSAL synchronization handle. */
-        uint8_t *payload;                   /**< Pointer into pool payload arena. */
+        cfuture_atomic_uint_fast32_t ref_count; /**< Dual-owner refcount: 2 -> 1 -> 0. */
+        cfuture_atomic_uint_fast32_t state;     /**< Current state (cfuture_state_t). */
+        int32_t error_code;                     /**< Result status / error code (0 = success). */
+        void *event_handle;                     /**< Injected OSAL synchronization handle. */
+        uint8_t *payload;                       /**< Pointer into pool payload arena. */
     } cfuture_slot_t;
 
     /* Forward declaration of pool container. */
@@ -99,15 +111,6 @@ extern "C"
     };
 
     /**
-     * @brief Consumer handle held by the Caller task.
-     */
-    typedef struct
-    {
-        uint8_t slot_id;      /**< Index into pool->slots array, or CFUTURE_INVALID_SLOT. */
-        cfuture_pool_t *pool; /**< Pointer to originating pool, or NULL if consumed/invalid. */
-    } cfuture_t;
-
-    /**
      * @brief Producer handle passed to the Worker task or ISR.
      */
     typedef struct
@@ -117,15 +120,24 @@ extern "C"
     } cpromise_t;
 
     /**
+     * @brief Consumer handle held by the Caller task.
+     */
+    typedef struct
+    {
+        uint8_t slot_id;      /**< Index into pool->slots array, or CFUTURE_INVALID_SLOT. */
+        cfuture_pool_t *pool; /**< Pointer to originating pool, or NULL if consumed/invalid. */
+    } cfuture_t;
+
+    /**
      * @brief Initializes a future pool with caller-provided static memory buffers.
      *
      * @param[out] pool         Pointer to pool struct to initialize.
      * @param[in]  capacity     Number of concurrent slots (1..32).
      * @param[in]  payload_size Size of result data per slot in bytes (can be 0).
-     * @param[in]  slots_buf    User-provided buffer for cfuture_slot_t array [capacity].
-     * @param[in]  payload_buf  User-provided buffer for payload arena [capacity * payload_size].
-     * @param[in]  sync_ops     Synchronization callbacks table (can be NULL for bare-metal PAL
-     * polling).
+     * @param[in]  slots_buf    Caller-provided array of cfuture_slot_t of length capacity.
+     * @param[in]  payload_buf  Caller-provided byte buffer of size capacity * payload_size (can be
+     * NULL if payload_size == 0).
+     * @param[in]  sync_ops     Pointer to OSAL interface table, or NULL for PAL polling mode.
      * @return true on success, false if parameters are invalid.
      */
     bool cfuture_pool_init(cfuture_pool_t *pool, uint32_t capacity, size_t payload_size,
