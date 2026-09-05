@@ -80,15 +80,15 @@ TEST_F(IsrSafetyTest, IsrFulfill_AfterCallerTimeout_SafelyRecyclesSlot)
     EXPECT_FALSE(cfuture_wait_for(&future, 0, nullptr, &err));
     EXPECT_EQ(err, CFUTURE_ERR_TIMEOUT);
 
-    // Caller dropped ref -> refcount is 1
-    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_acquire), 1U);
+    // Caller timed out -> state is TIMEOUT
+    EXPECT_EQ(pool.slots[0].state.load(std::memory_order_acquire),
+              (uint_fast32_t)CFUTURE_STATE_TIMEOUT);
 
     // Hardware ISR fires late
     uint32_t isr_data = 0x12345678;
     cpromise_set_value_from_isr(&promise, &isr_data, 0);
 
-    // ISR recycles slot
-    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_acquire), 0U);
+    // ISR recycles slot to IDLE
     EXPECT_EQ(pool.slots[0].state.load(std::memory_order_acquire),
               (uint_fast32_t)CFUTURE_STATE_IDLE);
     EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);

@@ -197,14 +197,13 @@ TEST_F(ConcurrencyStressTest, ConcurrentCreateFulfillConsumeCycles)
     // Wait a brief moment to ensure all late tasks unwind
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    // Zero memory leaks: All slots must be back in IDLE with ref_count == 0
+    // Zero memory leaks: All slots must be back in IDLE
     // Relaxed is sufficient here: all producer/consumer threads have already
     // been joined above, which establishes happens-before with this thread.
     EXPECT_EQ(m_pool.allocated_mask.load(std::memory_order_relaxed), 0U);
 
     for (uint32_t i = 0; i < kCapacity; ++i)
     {
-        EXPECT_EQ(m_pool.slots[i].ref_count.load(std::memory_order_relaxed), 0U);
         EXPECT_EQ(m_pool.slots[i].state.load(std::memory_order_relaxed),
                   (uint_fast32_t)CFUTURE_STATE_IDLE);
     }
