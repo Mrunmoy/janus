@@ -1,10 +1,16 @@
 /**
  * @file cfuture.c
- * @brief Zero-Heap Lock-Free Future/Promise Implementation
+ * @brief Zero-Heap Lock-Free Future/Promise Implementation for Embedded C
  *
- * Implements the core static pool bitmask allocation and state-driven lifecycle.
- * Dual ownership is coordinated entirely through atomic transitions on slot->state,
- * eliminating the need for a separate reference counter.
+ * Implements the core static pool bitmask allocation, dual-owner reference
+ * tracking, immediate non-blocking timeout unwinding, and ISR safety.
+ *
+ * Dual ownership (ref_count 2 -> 1 -> 0):
+ * - Slot is allocated with ref_count = 2 (1 for promise, 1 for future).
+ * - Producer holds its reference until event signaling is completely dispatched.
+ *   This ensures the consumer cannot recycle or reallocate the slot while the
+ *   producer is preempted inside or around cfuture_notify_consumer.
+ * - Whichever party finishes last decrements ref_count to 0 and recycles the slot.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -14,10 +20,10 @@
 #include <string.h>
 
 /**
- * @brief Atomically recycles a slot bit back into the pool's allocated bitmask.
+ * @brief Recycles a slot back to the pool by zeroing metadata and clearing its bitmask bit.
  *
  * @param pool    The pool container.
- * @param slot_id The index of the slot to recycle.
+ * @param slot_id The index of the slot to release.
  */
 static inline void cfuture_slot_recycle(cfuture_pool_t *pool, uint8_t slot_id)
 {
@@ -28,22 +34,37 @@ static inline void cfuture_slot_recycle(cfuture_pool_t *pool, uint8_t slot_id)
 
     cfuture_slot_t *slot = &pool->slots[slot_id];
     atomic_store_explicit(&slot->state, (uint_fast32_t)CFUTURE_STATE_IDLE, memory_order_release);
+    atomic_store_explicit(&slot->ref_count, 0U, memory_order_release);
 
     /* Release ordering guarantees all previous slot writes are visible before recycling */
     atomic_fetch_and_explicit(&pool->allocated_mask, ~((uint_fast32_t)1U << slot_id),
                               memory_order_release);
 }
 
+/**
+ * @brief Decrements a slot reference count and recycles the slot if it reaches zero.
+ *
+ * @param pool    The pool container.
+ * @param slot_id The index of the slot.
+ * @return Previous reference count prior to decrement.
+ */
+static inline uint_fast32_t cfuture_slot_release_ref(cfuture_pool_t *pool, uint8_t slot_id)
+{
+    cfuture_slot_t *slot = &pool->slots[slot_id];
+    uint_fast32_t prev_ref = atomic_fetch_sub_explicit(&slot->ref_count, 1U, memory_order_acq_rel);
+
+    if (prev_ref == 1U)
+    {
+        cfuture_slot_recycle(pool, slot_id);
+    }
+
+    return prev_ref;
+}
+
 #define CFUTURE_CAS_MAX_RETRIES ((uint32_t)1000U)
 
 #if defined(_MSC_VER)
 #include <intrin.h>
-/**
- * @brief Portable count trailing zeros for 32-bit integers on MSVC.
- *
- * @param mask Non-zero 32-bit mask.
- * @return Number of trailing zero bits.
- */
 static inline int cfuture_ctz32(uint32_t mask)
 {
     unsigned long index = 0UL;
@@ -51,25 +72,17 @@ static inline int cfuture_ctz32(uint32_t mask)
     return (int)index;
 }
 #else
-/**
- * @brief Portable count trailing zeros for 32-bit integers on GCC/Clang.
- *
- * @param mask Non-zero 32-bit mask.
- * @return Number of trailing zero bits.
- */
 static inline int cfuture_ctz32(uint32_t mask)
 {
-    return __builtin_ctz((unsigned int)mask);
+    return __builtin_ctz(mask);
 }
 #endif
 
 /**
- * @brief Attempts to allocate an unused slot index using lock-free CAS.
+ * @brief Claims the first available free slot in the pool using a lock-free CAS loop.
  *
- * Bounds retries to prevent unbounded execution in hard real-time systems.
- *
- * @param pool The pool container.
- * @return Allocated slot index, or CFUTURE_INVALID_SLOT if pool is saturated or retries exhausted.
+ * @param pool Pointer to pool container.
+ * @return Slot index (0..31) on success, or CFUTURE_INVALID_SLOT if full.
  */
 static uint8_t cfuture_pool_claim_slot(cfuture_pool_t *pool)
 {
@@ -110,13 +123,16 @@ static uint8_t cfuture_pool_claim_slot(cfuture_pool_t *pool)
 static inline void cfuture_notify_consumer(cfuture_pool_t *pool, cfuture_slot_t *slot,
                                            bool from_isr)
 {
-    if (from_isr && pool->sync_ops.event_set_from_isr && slot->event_handle)
+    if (pool->sync_ops.event_set && slot->event_handle)
     {
-        pool->sync_ops.event_set_from_isr(slot->event_handle);
-    }
-    else if (pool->sync_ops.event_set && slot->event_handle)
-    {
-        pool->sync_ops.event_set(slot->event_handle);
+        if (from_isr && pool->sync_ops.event_set_from_isr)
+        {
+            pool->sync_ops.event_set_from_isr(slot->event_handle);
+        }
+        else
+        {
+            pool->sync_ops.event_set(slot->event_handle);
+        }
     }
 }
 
@@ -124,9 +140,9 @@ static inline void cfuture_notify_consumer(cfuture_pool_t *pool, cfuture_slot_t 
  * @brief Shared fulfillment implementation for both task and ISR callers.
  *
  * @param promise    The promise handle.
- * @param payload    Optional result data pointer.
- * @param error_code Result status code.
- * @param from_isr   True if executing inside an ISR.
+ * @param payload    Pointer to payload to copy into slot arena (optional).
+ * @param error_code Result error code to store.
+ * @param from_isr   True if called from interrupt context.
  */
 static void cpromise_fulfill_impl(cpromise_t *promise, const void *payload, int32_t error_code,
                                   bool from_isr)
@@ -146,12 +162,12 @@ static void cpromise_fulfill_impl(cpromise_t *promise, const void *payload, int3
     uint_fast32_t current_state = atomic_load_explicit(&slot->state, memory_order_acquire);
     if (current_state >= (uint_fast32_t)CFUTURE_STATE_TIMEOUT)
     {
-        /* Consumer timed out or abandoned earlier; producer is second to finish, recycle slot */
-        cfuture_slot_recycle(pool, slot_id);
+        /* Consumer timed out or abandoned; producer drops final reference to recycle slot */
+        cfuture_slot_release_ref(pool, slot_id);
         return;
     }
 
-    if (payload && slot->payload && pool->payload_size > 0U)
+    if (payload && pool->payload_size > 0U && slot->payload)
     {
         memcpy(slot->payload, payload, pool->payload_size);
     }
@@ -165,22 +181,20 @@ static void cpromise_fulfill_impl(cpromise_t *promise, const void *payload, int3
                                                 (uint_fast32_t)CFUTURE_STATE_COMPLETED,
                                                 memory_order_release, memory_order_acquire))
     {
-        /* Producer finished first: notify consumer. Consumer will recycle slot upon read. */
         cfuture_notify_consumer(pool, slot, from_isr);
     }
-    else
-    {
-        /* Consumer timed out or abandoned while payload was copied; producer recycles slot */
-        cfuture_slot_recycle(pool, slot_id);
-    }
+
+    /* Producer releases its claim only AFTER signaling is completed.
+     * Prevents slot reuse/reset while producer is preempted inside notification. */
+    cfuture_slot_release_ref(pool, slot_id);
 }
 
 /**
  * @brief Shared drop implementation for both task and ISR callers.
  *
  * @param promise    The promise handle.
- * @param error_code Failure reason code.
- * @param from_isr   True if executing inside an ISR.
+ * @param error_code Result error code to store.
+ * @param from_isr   True if called from interrupt context.
  */
 static void cpromise_drop_impl(cpromise_t *promise, int32_t error_code, bool from_isr)
 {
@@ -196,6 +210,13 @@ static void cpromise_drop_impl(cpromise_t *promise, int32_t error_code, bool fro
     promise->pool = NULL;
     promise->slot_id = CFUTURE_INVALID_SLOT;
 
+    uint_fast32_t current_state = atomic_load_explicit(&slot->state, memory_order_acquire);
+    if (current_state >= (uint_fast32_t)CFUTURE_STATE_TIMEOUT)
+    {
+        cfuture_slot_release_ref(pool, slot_id);
+        return;
+    }
+
     slot->error_code = error_code;
 
     uint_fast32_t expected = (uint_fast32_t)CFUTURE_STATE_PENDING;
@@ -203,24 +224,20 @@ static void cpromise_drop_impl(cpromise_t *promise, int32_t error_code, bool fro
                                                 (uint_fast32_t)CFUTURE_STATE_DROPPED,
                                                 memory_order_release, memory_order_acquire))
     {
-        /* Producer finished first: notify consumer. Consumer will recycle slot upon read. */
         cfuture_notify_consumer(pool, slot, from_isr);
     }
-    else
-    {
-        /* Consumer timed out or abandoned; producer recycles slot */
-        cfuture_slot_recycle(pool, slot_id);
-    }
+
+    cfuture_slot_release_ref(pool, slot_id);
 }
 
 /**
- * @brief Copies payload and propagates status code upon future resolution.
+ * @brief Consumes a completed or dropped result, copying data and decrementing refcount.
  *
  * @param pool        The pool container.
- * @param slot_id     The index of the resolved slot.
- * @param state       The resolved state (COMPLETED or DROPPED).
- * @param out_payload Optional destination buffer for payload copy.
- * @param out_error   Optional destination for error code.
+ * @param slot_id     Slot index.
+ * @param state       Observed state (COMPLETED or DROPPED).
+ * @param out_payload Buffer to receive result payload (optional).
+ * @param out_error   Pointer to receive result error code (optional).
  * @return True if completed successfully, false if dropped.
  */
 static bool cfuture_consume_result(cfuture_pool_t *pool, uint8_t slot_id, uint_fast32_t state,
@@ -242,8 +259,7 @@ static bool cfuture_consume_result(cfuture_pool_t *pool, uint8_t slot_id, uint_f
             *out_error = slot->error_code;
         }
 
-        /* Consumer finished second: recycle slot */
-        cfuture_slot_recycle(pool, slot_id);
+        cfuture_slot_release_ref(pool, slot_id);
         return true;
     }
 
@@ -252,8 +268,7 @@ static bool cfuture_consume_result(cfuture_pool_t *pool, uint8_t slot_id, uint_f
         *out_error = slot->error_code;
     }
 
-    /* Consumer finished second: recycle slot */
-    cfuture_slot_recycle(pool, slot_id);
+    cfuture_slot_release_ref(pool, slot_id);
     return false;
 }
 
@@ -288,6 +303,7 @@ bool cfuture_pool_init(cfuture_pool_t *pool, uint32_t capacity, size_t payload_s
 
     for (uint32_t i = 0; i < capacity; ++i)
     {
+        atomic_store_explicit(&slots_buf[i].ref_count, 0U, memory_order_relaxed);
         atomic_store_explicit(&slots_buf[i].state, (uint_fast32_t)CFUTURE_STATE_IDLE,
                               memory_order_relaxed);
         slots_buf[i].error_code = 0;
@@ -350,6 +366,7 @@ void cfuture_pool_destroy(cfuture_pool_t *pool)
     atomic_store_explicit(&pool->allocated_mask, 0U, memory_order_relaxed);
     pool->capacity = 0U;
     pool->slots = NULL;
+    pool->payload_size = 0U;
     pool->payload_arena = NULL;
 }
 
@@ -375,6 +392,7 @@ bool cfuture_create(cfuture_pool_t *pool, cpromise_t *out_promise, cfuture_t *ou
 
     slot->error_code = 0;
     atomic_store_explicit(&slot->state, (uint_fast32_t)CFUTURE_STATE_PENDING, memory_order_release);
+    atomic_store_explicit(&slot->ref_count, 2U, memory_order_release);
 
     out_promise->slot_id = slot_id;
     out_promise->pool = pool;
@@ -393,9 +411,10 @@ bool cpromise_is_active(const cpromise_t *promise)
     }
 
     cfuture_slot_t *slot = &promise->pool->slots[promise->slot_id];
+    uint_fast32_t ref = atomic_load_explicit(&slot->ref_count, memory_order_acquire);
     uint_fast32_t st = atomic_load_explicit(&slot->state, memory_order_acquire);
 
-    return (st == (uint_fast32_t)CFUTURE_STATE_PENDING);
+    return (ref == 2U) && (st == (uint_fast32_t)CFUTURE_STATE_PENDING);
 }
 
 void cpromise_set_value(cpromise_t *promise, const void *payload, int32_t error_code)
@@ -471,16 +490,16 @@ bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
                                                         (uint_fast32_t)CFUTURE_STATE_TIMEOUT,
                                                         memory_order_acq_rel, memory_order_acquire))
             {
-                /* Consumer won timeout race. Producer will see TIMEOUT when done and recycle. */
                 if (out_error)
                 {
                     *out_error = CFUTURE_ERR_TIMEOUT;
                 }
+
+                cfuture_slot_release_ref(pool, slot_id);
                 return false;
             }
             else
             {
-                /* Producer fulfilled or dropped during the timeout check */
                 st = atomic_load_explicit(&slot->state, memory_order_acquire);
             }
         }
@@ -497,6 +516,7 @@ bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
                                                                   : CFUTURE_ERR_ABANDONED;
     }
 
+    cfuture_slot_release_ref(pool, slot_id);
     return false;
 }
 
@@ -515,14 +535,9 @@ void cfuture_abandon(cfuture_t *future)
     future->slot_id = CFUTURE_INVALID_SLOT;
 
     uint_fast32_t expected = (uint_fast32_t)CFUTURE_STATE_PENDING;
-    if (atomic_compare_exchange_strong_explicit(&slot->state, &expected,
-                                                (uint_fast32_t)CFUTURE_STATE_ABANDONED,
-                                                memory_order_acq_rel, memory_order_acquire))
-    {
-        /* Consumer won abandon race; producer will see ABANDONED and recycle */
-        return;
-    }
+    atomic_compare_exchange_strong_explicit(&slot->state, &expected,
+                                            (uint_fast32_t)CFUTURE_STATE_ABANDONED,
+                                            memory_order_acq_rel, memory_order_acquire);
 
-    /* Producer already completed or dropped; consumer is second to finish, recycle slot */
-    cfuture_slot_recycle(pool, slot_id);
+    cfuture_slot_release_ref(pool, slot_id);
 }
