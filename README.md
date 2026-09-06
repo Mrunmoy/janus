@@ -8,7 +8,7 @@
 [![Code Coverage: 92.5%](https://img.shields.io/badge/Line%20Coverage-92.5%25-brightgreen.svg)]()
 [![ThreadSanitizer Clean](https://img.shields.io/badge/ThreadSanitizer-Verified%20(100k%20Cycles)-success.svg)]()
 [![ASan & UBSan Clean](https://img.shields.io/badge/Sanitizers-ASan%20%7C%20UBSan%20Clean-success.svg)]()
-[![ROM Footprint: < 3 KB](https://img.shields.io/badge/ROM%20Footprint-%3C%203%20KB%20(2925%20Bytes)-orange.svg)]()
+[![ROM Footprint: < 6 KB](https://img.shields.io/badge/ROM%20Footprint-%3C%206%20KB%20(5617%20Bytes)-orange.svg)]()
 [![RAM Mutable: 0 Bytes](https://img.shields.io/badge/RAM%20Mutable-0%20Bytes%20(.bss%2F.data)-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -261,7 +261,7 @@ return false; // Contention budget exceeded
 For hardware-level clock timing and instruction pipeline relaxation, `libcfuture` introduces an unopinionated Platform Abstraction Layer (`cfuture_pal.h` / `src/cfuture_pal.c`):
 
 - **Monotonic Hardware Clock (`cfuture_pal_time_ms`)**: Returns the platform's monotonic hardware time in milliseconds without requiring an RTOS timer service.
-  - On **ARM Cortex-M**, it weakly hooks `HAL_GetTick()` if linked into the binary. If no board HAL is linked (e.g. during isolated unit testing), it increments an internal monotonic counter upon each query, guaranteeing that polling timeouts reliably terminate rather than hanging in an infinite loop.
+  - On **ARM Cortex-M**, it weakly hooks `HAL_GetTick()` if linked into the binary. If no board HAL or hardware timer is linked (e.g. during isolated unit testing or before clock init), it increments an internal fallback counter upon each query to guarantee that polling loops deterministically terminate rather than hanging in an infinite loop. **Note**: Because the unlinked fallback counter increments per query rather than in physical real time, real-time millisecond deadline accuracy requires providing a hardware timer or implementing `HAL_GetTick()`.
   - On host systems, it maps directly to `clock_gettime(CLOCK_MONOTONIC)` (POSIX) or `GetTickCount64()` (Win32).
   - Target firmware can cleanly override `cfuture_pal_time_ms()` with their own high-resolution hardware timer.
 - **CPU Relax / Pipeline Yield (`cfuture_pal_cpu_relax`)**:
@@ -465,17 +465,19 @@ sequenceDiagram
 
 ### Status and Error Codes
 
-`libcfuture` error codes follow standard UNIX/POSIX negative errno conventions. They map directly to standard system return codes without translation layers:
+`libcfuture` error codes follow standard UNIX/POSIX negative errno conventions. When `<errno.h>` is present, they expand to the target platform's native errno values (e.g. `-ETIMEDOUT`, `-ECANCELED`, `-ECONNABORTED`, `-EINVAL`, `-ENOSPC`):
 
-| Symbolic Code | Standard UNIX Value | Description |
+| Symbolic Code | Platform POSIX Mapping | Description |
 | :--- | :--- | :--- |
 | `CFUTURE_OK` | `0` | Success / normal fulfillment |
-| `CFUTURE_ERR_TIMEOUT` | `-ETIMEDOUT` (`-110`) | Operation timed out before fulfillment |
-| `CFUTURE_ERR_DROPPED` | `-ECANCELED` (`-125`) | Worker dropped/aborted promise without fulfilling |
-| `CFUTURE_ERR_ABANDONED` | `-ECONNABORTED` (`-103`) | Consumer explicitly abandoned the future |
-| `CFUTURE_ERR_PARAM` | `-EINVAL` (`-22`) | Invalid parameter passed to API |
-| `CFUTURE_ERR_FULL` | `-ENOSPC` (`-28`) | Static pool bitmask saturated (all slots occupied) |
-| `CFUTURE_ERR_INVALID` | `-EINVAL` (`-22`) | Handle or slot state corrupted / invalid |
+| `CFUTURE_ERR_TIMEOUT` | `-ETIMEDOUT` | Operation timed out before fulfillment |
+| `CFUTURE_ERR_DROPPED` | `-ECANCELED` | Worker dropped/aborted promise without fulfilling |
+| `CFUTURE_ERR_ABANDONED` | `-ECONNABORTED` | Consumer explicitly abandoned the future |
+| `CFUTURE_ERR_PARAM` | `-EINVAL` | Invalid parameter passed to API |
+| `CFUTURE_ERR_FULL` | `-ENOSPC` | Static pool bitmask saturated (all slots occupied) |
+| `CFUTURE_ERR_INVALID` | `-EINVAL` | Handle or slot state corrupted / invalid |
+
+*Note: Exact numeric values are defined by the host/target platform C library (e.g. Linux, macOS, or toolchain libc fallback).*
 
 ---
 
@@ -547,7 +549,7 @@ void cpromise_set_value_from_isr(cpromise_t *promise, const void *payload, int32
 Fulfills the promise with a payload and status code.
 - If slot is `CFUTURE_STATE_PENDING`: Copies `payload` into slot arena, transitions state to `CFUTURE_STATE_COMPLETED`, signals OS event, and releases producer reference.
 - If slot is `CFUTURE_STATE_TIMEOUT` or `CFUTURE_STATE_ABANDONED`: **Discards copy**, skips event signal, and drops final producer reference ($1 \to 0$), safely recycling the slot.
-- **`_from_isr` variant**: Reentrant and safe to call from hardware interrupt service routines without blocking.
+- **`_from_isr` variant**: Reentrant and safe to call from hardware interrupt service routines without blocking. **Note on OSAL contract**: When using an OSAL synchronization adapter table (`cfuture_sync_ops_t`), `event_set_from_isr` must be populated with an interrupt-safe OS kernel API (e.g. `xEventGroupSetBitsFromISR` on FreeRTOS or `tx_event_flags_set` on ThreadX). If `event_set_from_isr` is `NULL`, `cfuture` falls back to `event_set`, which is only safe if the underlying adapter's `event_set` is safe to call from an ISR (such as in atomic polling mode).
 
 ```c
 void cpromise_drop(cpromise_t *promise, int32_t status_code);
@@ -571,7 +573,7 @@ Declared in `include/cfuture_pal.h`:
 uint32_t cfuture_pal_time_ms(void);
 void cfuture_pal_cpu_relax(void);
 ```
-- `cfuture_pal_time_ms`: Returns monotonic clock in milliseconds. Provides bounded termination for polling waits without RTOS timers. Weakly bound on Cortex-M to allow board glue (`HAL_GetTick()`) or fallback monotonic tick counter.
+- `cfuture_pal_time_ms`: Returns monotonic elapsed time in milliseconds when linked with a platform timer (e.g. `HAL_GetTick()`, `clock_gettime()`, or `GetTickCount64()`). When unlinked on ARM Cortex-M, advances an internal fallback counter per call to guarantee bounded timeout termination; real-time millisecond accuracy requires linking a hardware clock.
 - `cfuture_pal_cpu_relax`: Issues architecture-appropriate low-power yield. Emits Thumb-2 `yield` instruction on ARM Cortex-M, `sched_yield()` on POSIX, or `YieldProcessor()` on Win32.
 
 ---
@@ -851,7 +853,7 @@ Measured on release library build (`gcc 13.3.0 -O3 -DNDEBUG`):
    1609      48   12329   13986    36a2 cfuture_posix.c.o
 ```
 
-- **Core ROM Footprint**: **2,925 bytes** (< 3 KB).
+- **Core ROM Footprint**: **5,368 bytes** (5,617 bytes including PAL, < 6 KB).
 - **Mutable Global RAM (`.data` / `.bss`)**: **0 bytes**.
 - **Dynamic Heap Memory (`malloc`/`free`)**: **0 bytes** (Audited via `nm`).
 
