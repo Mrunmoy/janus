@@ -141,10 +141,10 @@ static inline void cfuture_notify_consumer(cfuture_pool_t *pool, cfuture_slot_t 
  *
  * @param promise    The promise handle.
  * @param payload    Pointer to payload to copy into slot arena (optional).
- * @param error_code Result error code to store.
- * @param from_isr   True if called from interrupt context.
+ * @param status_code Result status code to store.
+ * @param from_isr    True if called from interrupt context.
  */
-static void cpromise_fulfill_impl(cpromise_t *promise, const void *payload, int32_t error_code,
+static void cpromise_fulfill_impl(cpromise_t *promise, const void *payload, int32_t status_code,
                                   bool from_isr)
 {
     if (!promise || !promise->pool || promise->slot_id >= promise->pool->capacity)
@@ -172,7 +172,7 @@ static void cpromise_fulfill_impl(cpromise_t *promise, const void *payload, int3
         memcpy(slot->payload, payload, pool->payload_size);
     }
 
-    slot->error_code = error_code;
+    slot->status_code = status_code;
 
     atomic_thread_fence(memory_order_release);
 
@@ -217,7 +217,7 @@ static void cpromise_drop_impl(cpromise_t *promise, int32_t error_code, bool fro
         return;
     }
 
-    slot->error_code = error_code;
+    slot->status_code = error_code;
 
     uint_fast32_t expected = (uint_fast32_t)CFUTURE_STATE_PENDING;
     if (atomic_compare_exchange_strong_explicit(&slot->state, &expected,
@@ -237,11 +237,11 @@ static void cpromise_drop_impl(cpromise_t *promise, int32_t error_code, bool fro
  * @param slot_id     Slot index.
  * @param state       Observed state (COMPLETED or DROPPED).
  * @param out_payload Buffer to receive result payload (optional).
- * @param out_error   Pointer to receive result error code (optional).
+ * @param out_status  Pointer to receive result status code (optional).
  * @return True if completed successfully, false if dropped.
  */
 static bool cfuture_consume_result(cfuture_pool_t *pool, uint8_t slot_id, uint_fast32_t state,
-                                   void *out_payload, int32_t *out_error)
+                                   void *out_payload, int32_t *out_status)
 {
     const cfuture_slot_t *slot = &pool->slots[slot_id];
 
@@ -254,18 +254,18 @@ static bool cfuture_consume_result(cfuture_pool_t *pool, uint8_t slot_id, uint_f
             memcpy(out_payload, slot->payload, pool->payload_size);
         }
 
-        if (out_error)
+        if (out_status)
         {
-            *out_error = slot->error_code;
+            *out_status = slot->status_code;
         }
 
         cfuture_slot_release_ref(pool, slot_id);
         return true;
     }
 
-    if (out_error)
+    if (out_status)
     {
-        *out_error = slot->error_code;
+        *out_status = slot->status_code;
     }
 
     cfuture_slot_release_ref(pool, slot_id);
@@ -306,7 +306,7 @@ bool cfuture_pool_init(cfuture_pool_t *pool, uint32_t capacity, size_t payload_s
         atomic_store_explicit(&slots_buf[i].ref_count, 0U, memory_order_relaxed);
         atomic_store_explicit(&slots_buf[i].state, (uint_fast32_t)CFUTURE_STATE_IDLE,
                               memory_order_relaxed);
-        slots_buf[i].error_code = 0;
+        slots_buf[i].status_code = 0;
         slots_buf[i].payload =
             (payload_buf && payload_size > 0U) ? (payload_buf + (i * payload_size)) : NULL;
 
@@ -390,7 +390,7 @@ bool cfuture_create(cfuture_pool_t *pool, cpromise_t *out_promise, cfuture_t *ou
         pool->sync_ops.event_reset(slot->event_handle);
     }
 
-    slot->error_code = 0;
+    slot->status_code = 0;
     atomic_store_explicit(&slot->state, (uint_fast32_t)CFUTURE_STATE_PENDING, memory_order_release);
     atomic_store_explicit(&slot->ref_count, 2U, memory_order_release);
 
@@ -417,9 +417,9 @@ bool cpromise_is_active(const cpromise_t *promise)
     return (ref == 2U) && (st == (uint_fast32_t)CFUTURE_STATE_PENDING);
 }
 
-void cpromise_set_value(cpromise_t *promise, const void *payload, int32_t error_code)
+void cpromise_set_value(cpromise_t *promise, const void *payload, int32_t status_code)
 {
-    cpromise_fulfill_impl(promise, payload, error_code, false);
+    cpromise_fulfill_impl(promise, payload, status_code, false);
 }
 
 void cpromise_drop(cpromise_t *promise, int32_t error_code)
@@ -427,9 +427,9 @@ void cpromise_drop(cpromise_t *promise, int32_t error_code)
     cpromise_drop_impl(promise, error_code, false);
 }
 
-void cpromise_set_value_from_isr(cpromise_t *promise, const void *payload, int32_t error_code)
+void cpromise_set_value_from_isr(cpromise_t *promise, const void *payload, int32_t status_code)
 {
-    cpromise_fulfill_impl(promise, payload, error_code, true);
+    cpromise_fulfill_impl(promise, payload, status_code, true);
 }
 
 void cpromise_drop_from_isr(cpromise_t *promise, int32_t error_code)
@@ -437,13 +437,14 @@ void cpromise_drop_from_isr(cpromise_t *promise, int32_t error_code)
     cpromise_drop_impl(promise, error_code, true);
 }
 
-bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload, int32_t *out_error)
+bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
+                      int32_t *out_status)
 {
     if (!future || !future->pool || future->slot_id >= future->pool->capacity)
     {
-        if (out_error)
+        if (out_status)
         {
-            *out_error = CFUTURE_ERR_INVALID;
+            *out_status = CFUTURE_ERR_INVALID;
         }
         return false;
     }
@@ -490,9 +491,9 @@ bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
                                                         (uint_fast32_t)CFUTURE_STATE_TIMEOUT,
                                                         memory_order_acq_rel, memory_order_acquire))
             {
-                if (out_error)
+                if (out_status)
                 {
-                    *out_error = CFUTURE_ERR_TIMEOUT;
+                    *out_status = CFUTURE_ERR_TIMEOUT;
                 }
 
                 cfuture_slot_release_ref(pool, slot_id);
@@ -507,13 +508,13 @@ bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
 
     if (st == (uint_fast32_t)CFUTURE_STATE_COMPLETED || st == (uint_fast32_t)CFUTURE_STATE_DROPPED)
     {
-        return cfuture_consume_result(pool, slot_id, st, out_payload, out_error);
+        return cfuture_consume_result(pool, slot_id, st, out_payload, out_status);
     }
 
-    if (out_error)
+    if (out_status)
     {
-        *out_error = (st == (uint_fast32_t)CFUTURE_STATE_TIMEOUT) ? CFUTURE_ERR_TIMEOUT
-                                                                  : CFUTURE_ERR_ABANDONED;
+        *out_status = (st == (uint_fast32_t)CFUTURE_STATE_TIMEOUT) ? CFUTURE_ERR_TIMEOUT
+                                                                   : CFUTURE_ERR_ABANDONED;
     }
 
     cfuture_slot_release_ref(pool, slot_id);

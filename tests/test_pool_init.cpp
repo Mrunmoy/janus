@@ -70,7 +70,7 @@ TEST_F(PoolInitTest, InitializesSlotsAndInvokesEventCreate)
     {
         EXPECT_EQ(pool.slots[i].state.load(std::memory_order_relaxed),
                   (uint_fast32_t)CFUTURE_STATE_IDLE);
-        EXPECT_EQ(pool.slots[i].error_code, 0);
+        EXPECT_EQ(pool.slots[i].status_code, 0);
         EXPECT_NE(pool.slots[i].event_handle, nullptr);
         EXPECT_EQ(pool.slots[i].payload, payload_arena + (i * kPayloadSize));
     }

@@ -508,8 +508,8 @@ Explicitly abandons the future without waiting. Transitions pending slot to `CFU
 ### Producer (Promise) Operations
 
 ```c
-bool cpromise_set_value(cpromise_t *promise, const void *value, int32_t error_code);
-bool cpromise_set_value_from_isr(cpromise_t *promise, const void *value, int32_t error_code);
+void cpromise_set_value(cpromise_t *promise, const void *value, int32_t status_code);
+void cpromise_set_value_from_isr(cpromise_t *promise, const void *value, int32_t status_code);
 ```
 Fulfills the promise with a payload and error code.
 - If slot is `CFUTURE_STATE_PENDING`: Copies `value` into slot arena, transitions state to `CFUTURE_STATE_COMPLETED`, signals OS event, and releases producer reference.
