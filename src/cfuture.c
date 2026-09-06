@@ -193,10 +193,10 @@ static void cpromise_fulfill_impl(cpromise_t *promise, const void *payload, int3
  * @brief Shared drop implementation for both task and ISR callers.
  *
  * @param promise    The promise handle.
- * @param error_code Result error code to store.
- * @param from_isr   True if called from interrupt context.
+ * @param status_code Result status code to store.
+ * @param from_isr    True if called from interrupt context.
  */
-static void cpromise_drop_impl(cpromise_t *promise, int32_t error_code, bool from_isr)
+static void cpromise_drop_impl(cpromise_t *promise, int32_t status_code, bool from_isr)
 {
     if (!promise || !promise->pool || promise->slot_id >= promise->pool->capacity)
     {
@@ -217,7 +217,7 @@ static void cpromise_drop_impl(cpromise_t *promise, int32_t error_code, bool fro
         return;
     }
 
-    slot->status_code = error_code;
+    slot->status_code = status_code;
 
     uint_fast32_t expected = (uint_fast32_t)CFUTURE_STATE_PENDING;
     if (atomic_compare_exchange_strong_explicit(&slot->state, &expected,
@@ -422,9 +422,9 @@ void cpromise_set_value(cpromise_t *promise, const void *payload, int32_t status
     cpromise_fulfill_impl(promise, payload, status_code, false);
 }
 
-void cpromise_drop(cpromise_t *promise, int32_t error_code)
+void cpromise_drop(cpromise_t *promise, int32_t status_code)
 {
-    cpromise_drop_impl(promise, error_code, false);
+    cpromise_drop_impl(promise, status_code, false);
 }
 
 void cpromise_set_value_from_isr(cpromise_t *promise, const void *payload, int32_t status_code)
@@ -432,9 +432,9 @@ void cpromise_set_value_from_isr(cpromise_t *promise, const void *payload, int32
     cpromise_fulfill_impl(promise, payload, status_code, true);
 }
 
-void cpromise_drop_from_isr(cpromise_t *promise, int32_t error_code)
+void cpromise_drop_from_isr(cpromise_t *promise, int32_t status_code)
 {
-    cpromise_drop_impl(promise, error_code, true);
+    cpromise_drop_impl(promise, status_code, true);
 }
 
 bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,

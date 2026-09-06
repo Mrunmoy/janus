@@ -202,9 +202,9 @@ extern "C"
      * @brief Drops the promise without fulfilling (fails the waiting consumer).
      *
      * @param[in,out] promise    The promise handle. Invalidated upon return.
-     * @param[in]     error_code Failure reason code.
+     * @param[in]     status_code Failure reason or status code to store (e.g. CFUTURE_ERR_DROPPED).
      */
-    void cpromise_drop(cpromise_t *promise, int32_t error_code);
+    void cpromise_drop(cpromise_t *promise, int32_t status_code);
 
     /**
      * @brief Fulfills the promise from an Interrupt Service Routine (ISR).
@@ -219,9 +219,9 @@ extern "C"
      * @brief Drops the promise from an Interrupt Service Routine (ISR).
      *
      * @param[in,out] promise    The promise handle. Invalidated upon return.
-     * @param[in]     error_code Failure reason code.
+     * @param[in]     status_code Failure reason or status code to store (e.g. CFUTURE_ERR_DROPPED).
      */
-    void cpromise_drop_from_isr(cpromise_t *promise, int32_t error_code);
+    void cpromise_drop_from_isr(cpromise_t *promise, int32_t status_code);
 
 /**
  * @brief Helper macro to allocate static storage buffers for a pool.
@@ -264,13 +264,24 @@ extern "C"
         return cpromise_is_active((const cpromise_t *)p);                                          \
     }                                                                                              \
     static inline void subsystem_name##_promise_set(subsystem_name##_promise_t *p,                 \
-                                                    const payload_type *val, int32_t status)       \
+                                                    const payload_type *val, int32_t status_code)  \
     {                                                                                              \
-        cpromise_set_value((cpromise_t *)p, (const void *)val, status);                            \
+        cpromise_set_value((cpromise_t *)p, (const void *)val, status_code);                       \
     }                                                                                              \
-    static inline void subsystem_name##_promise_drop(subsystem_name##_promise_t *p, int32_t err)   \
+    static inline void subsystem_name##_promise_drop(subsystem_name##_promise_t *p,                \
+                                                     int32_t status_code)                          \
     {                                                                                              \
-        cpromise_drop((cpromise_t *)p, err);                                                       \
+        cpromise_drop((cpromise_t *)p, status_code);                                               \
+    }                                                                                              \
+    static inline void subsystem_name##_promise_set_from_isr(                                      \
+        subsystem_name##_promise_t *p, const payload_type *val, int32_t status_code)               \
+    {                                                                                              \
+        cpromise_set_value_from_isr((cpromise_t *)p, (const void *)val, status_code);              \
+    }                                                                                              \
+    static inline void subsystem_name##_promise_drop_from_isr(subsystem_name##_promise_t *p,       \
+                                                              int32_t status_code)                 \
+    {                                                                                              \
+        cpromise_drop_from_isr((cpromise_t *)p, status_code);                                      \
     }
 
 #ifdef __cplusplus
