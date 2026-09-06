@@ -61,7 +61,7 @@ typedef struct
 } cmd_queue_t;
 
 static cmd_queue_t s_cmd_queue;
-CFUTURE_DEFINE_STATIC_BUFFERS(s_nvm, STORAGE_POOL_CAPACITY, sizeof(storage_result_t));
+CFUTURE_DEFINE_STATIC_BUFFERS(s_nvm, storage_result_t, STORAGE_POOL_CAPACITY);
 static cfuture_pool_t s_nvm_pool;
 
 /**

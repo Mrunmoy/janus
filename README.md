@@ -29,6 +29,7 @@ The library eliminates the three classical failure modes of embedded asynchronou
   - [Architectural Layers](#architectural-layers)
   - [Dual-Owner Reference Counting Protocol ($2 \to 1 \to 0$)](#dual-owner-reference-counting-protocol-2-to-1-to-0)
   - [Bounded-Time Bitmask CAS Allocation](#bounded-time-bitmask-cas-allocation)
+  - [Platform Abstraction Layer (PAL - `cfuture_pal.h`)](#platform-abstraction-layer-pal---cfuture_palh)
   - [Dependency Injection OSAL (`cfuture_sync_ops_t`)](#dependency-injection-osal-cfuture_sync_ops_t)
   - [Strict Interrupt (ISR) Reentrancy](#strict-interrupt-isr-reentrancy)
   - [Type Safety Without `void*` Casting](#type-safety-without-void-casting)
@@ -45,7 +46,8 @@ The library eliminates the three classical failure modes of embedded asynchronou
   - [Future & Promise Creation](#future--promise-creation)
   - [Consumer (Future) Operations](#consumer-future-operations)
   - [Producer (Promise) Operations](#producer-promise-operations)
-  - [Synchronization Provider Contract](#synchronization-provider-contract)
+  - [Platform Abstraction Layer (PAL) Primitives](#platform-abstraction-layer-pal-primitives)
+  - [Synchronization Provider Contract (OSAL)](#synchronization-provider-contract-osal)
   - [Typed Pool Static Generators](#typed-pool-static-generators)
 - [7. Canonical Implementation Walkthrough](#7-canonical-implementation-walkthrough)
   - [Shared Servicer Pipeline (Flash Storage & Audio Tasks)](#shared-servicer-pipeline-flash-storage--audio-tasks)
@@ -180,9 +182,12 @@ When an operation takes longer than the caller can tolerate, the servicer requir
 │ Bitmask CAS Allocation (atomic_uint_fast32_t) │ Bounded Retry Real-Time Loop│
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ LAYER 4: DEPENDENCY-INJECTED SYNCHRONIZATION OSAL                           │
-│ const cfuture_sync_ops_t *sync_ops (Function Pointer Interface Table)       │
+│ cfuture_osal.h: const cfuture_sync_ops_t *sync_ops (Function Pointer Table) │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ LAYER 5: TARGET ADAPTER PLATFORMS                                           │
+│ LAYER 5: PLATFORM ABSTRACTION LAYER (PAL)                                   │
+│ cfuture_pal.h / cfuture_pal.c: cfuture_pal_time_ms() │ cfuture_pal_cpu_relax│
+├─────────────────────────────────────────────────────────────────────────────┤
+│ LAYER 6: TARGET PLATFORMS & ADAPTER IMPLEMENTATIONS                         │
 │ cfuture_posix (Pthreads) │ cfuture_win32 (Events) │ cfuture_polling (Atomic)│
 │ FreeRTOS EventGroups     │ Azure ThreadX Flags    │ Zephyr Kernel Events    │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -250,19 +255,39 @@ return false; // Contention budget exceeded
 
 ---
 
+### Platform Abstraction Layer (PAL - `cfuture_pal.h`)
+
+For hardware-level clock timing and instruction pipeline relaxation, `libcfuture` introduces an unopinionated Platform Abstraction Layer (`cfuture_pal.h` / `src/cfuture_pal.c`):
+
+- **Monotonic Hardware Clock (`cfuture_pal_time_ms`)**: Returns the platform's monotonic hardware time in milliseconds without requiring an RTOS timer service.
+  - On **ARM Cortex-M**, it weakly hooks `HAL_GetTick()` if linked into the binary. If no board HAL is linked (e.g. during isolated unit testing), it increments an internal monotonic counter upon each query, guaranteeing that polling timeouts reliably terminate rather than hanging in an infinite loop.
+  - On host systems, it maps directly to `clock_gettime(CLOCK_MONOTONIC)` (POSIX) or `GetTickCount64()` (Win32).
+  - Target firmware can cleanly override `cfuture_pal_time_ms()` with their own high-resolution hardware timer.
+- **CPU Relax / Pipeline Yield (`cfuture_pal_cpu_relax`)**:
+  - On **ARM Cortex-M**, it issues the Thumb-2 `yield` assembly hint instruction (`__asm__ volatile("yield" ::: "memory")`). This hints to the pipeline/interconnect to optimize power and bus arbitrations without introducing the check-then-sleep race conditions inherent to `WFI` (Wait For Interrupt).
+  - On host operating systems, it calls `sched_yield()` (POSIX) or `YieldProcessor()` (Win32) to relinquish the remaining timeslice to co-running threads.
+
+---
+
 ### Dependency Injection OSAL (`cfuture_sync_ops_t`)
 
 `libcfuture` contains zero OS `#ifdef` preprocessor directives. Platform synchronization primitives are injected dynamically through a function pointer structure:
 
 ```c
-typedef struct cfuture_sync_ops
+typedef struct
 {
-    bool (*event_create)(void **event_ctx);
-    void (*event_destroy)(void *event_ctx);
-    bool (*event_set)(void *event_ctx);
-    bool (*event_set_from_isr)(void *event_ctx); // Safe for interrupt context
-    bool (*event_wait)(void *event_ctx, uint32_t timeout_ms);
-    void (*event_reset)(void *event_ctx);
+    /** Allocates/initializes a synchronization primitive. */
+    void *(*event_create)(void);
+    /** Destroys/releases a synchronization primitive. */
+    void (*event_destroy)(void *event_handle);
+    /** Signals the event from task context. */
+    void (*event_set)(void *event_handle);
+    /** Waits for the event to be signaled, with timeout in ms. Returns true if signaled. */
+    bool (*event_wait)(void *event_handle, uint32_t timeout_ms);
+    /** Resets the event to unsignaled state prior to slot reuse (optional, can be NULL). */
+    void (*event_reset)(void *event_handle);
+    /** Signals the event from ISR context (optional; falls back to event_set if NULL). */
+    void (*event_set_from_isr)(void *event_handle);
 } cfuture_sync_ops_t;
 ```
 
@@ -299,7 +324,7 @@ stateDiagram-v2
     PENDING --> COMPLETED : cpromise_set_value() [Success]
     PENDING --> DROPPED : cpromise_drop() [Worker Abort]
     PENDING --> TIMEOUT : cfuture_wait_for() [Deadline Expired]
-    PENDING --> ABANDONED : cfuture_drop() [Caller Terminated]
+    PENDING --> ABANDONED : cfuture_abandon() [Caller Terminated]
 
     COMPLETED --> IDLE : Both Owners Released [RC=0]
     DROPPED --> IDLE : Both Owners Released [RC=0]
@@ -319,7 +344,7 @@ All state transitions are single atomic Compare-And-Swap (CAS) operations. If tw
 | `PENDING` | `COMPLETED` | Producer / Worker | `cpromise_set_value()` | `2 \to 1` or `1 \to 0` | **Yes** (to slot arena) | **Yes** (`event_set`) |
 | `PENDING` | `DROPPED` | Producer / Worker | `cpromise_drop()` | `2 \to 1` or `1 \to 0` | No | **Yes** (`event_set`) |
 | `PENDING` | `TIMEOUT` | Consumer / Caller | `cfuture_wait_for()` | `2 \to 1` | No | No |
-| `PENDING` | `ABANDONED` | Consumer / Caller | `cfuture_drop()` | `2 \to 1` | No | No |
+| `PENDING` | `ABANDONED` | Consumer / Caller | `cfuture_abandon()` | `2 \to 1` | No | No |
 | `TIMEOUT` | `TIMEOUT` | Producer / Worker | `cpromise_set_value()` | `1 \to 0` (Final drop) | **No** (Discarded!) | No |
 | `ABANDONED` | `ABANDONED` | Producer / Worker | `cpromise_set_value()` | `1 \to 0` (Final drop) | **No** (Discarded!) | No |
 
@@ -380,7 +405,7 @@ sequenceDiagram
     Q->>S: Servicer finally pops cmd_A from queue
     S->>P: cpromise_is_active(&promise_A)
     Note over S: Returns false (detected TIMEOUT)!<br/>Skips expensive hardware work!
-    S->>P: cpromise_drop(&promise_A, 0)
+    S->>P: cpromise_drop(&promise_A, CFUTURE_ERR_DROPPED)
     Note over P: refcount: 1 -> 0 (Final release)<br/>Slot #0 recycled into bitmask!
 ```
 
@@ -443,28 +468,22 @@ sequenceDiagram
 bool cfuture_pool_init(cfuture_pool_t *pool,
                        uint32_t capacity,
                        size_t payload_size,
-                       cfuture_slot_t *slots_memory,
-                       void *payload_arena,
+                       cfuture_slot_t *slots_buf,
+                       uint8_t *payload_buf,
                        const cfuture_sync_ops_t *sync_ops);
 ```
 Initializes a static future pool.
 - `capacity`: Number of slots (must be $\ge 1$ and $\le$ `CFUTURE_MAX_CAPACITY` = 32).
-- `payload_size`: Size in bytes of the payload structure.
-- `slots_memory`: Pointer to caller-allocated array of `cfuture_slot_t[capacity]`.
-- `payload_arena`: Pointer to caller-allocated buffer of `capacity * payload_size` bytes.
-- `sync_ops`: Pointer to OS synchronization adapter table.
+- `payload_size`: Size in bytes of the payload structure (can be 0).
+- `slots_buf`: Pointer to caller-allocated array of `cfuture_slot_t[capacity]`.
+- `payload_buf`: Pointer to caller-allocated buffer of `capacity * payload_size` bytes (can be `NULL` if `payload_size == 0`).
+- `sync_ops`: Pointer to OS synchronization adapter table (or `NULL` for bare-metal polling mode).
 - **Returns**: `true` on success, `false` on invalid parameters or failed event creation.
 
 ```c
 void cfuture_pool_destroy(cfuture_pool_t *pool);
 ```
-Destroys all OS events within the pool and clears the bitmask.
-
-```c
-uint32_t cfuture_pool_capacity(const cfuture_pool_t *pool);
-uint32_t cfuture_pool_available_count(const cfuture_pool_t *pool);
-```
-Query pool capacity and currently available (unallocated) slot count.
+Destroys all OS events within the pool and cleans up synchronization handles.
 
 ---
 
@@ -483,44 +502,42 @@ Atomically claims an available slot from the pool bitmask using lock-free CAS.
 ### Consumer (Future) Operations
 
 ```c
-bool cfuture_wait(cfuture_t *future, void *out_value, int32_t *out_error);
-bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_value, int32_t *out_error);
+bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload, int32_t *out_status);
 ```
 Blocks the calling task until the promise is resolved, dropped, or the timeout expires.
-- `out_value`: Destination buffer receiving the completed payload copy (may be `NULL`).
-- `out_error`: Destination integer receiving the application status/error code (may be `NULL`).
+- `future`: The future handle. Invalidated upon return (`slot_id` set to `CFUTURE_INVALID_SLOT`, `pool` set to `NULL`).
+- `timeout_ms`: Timeout in milliseconds (`0` = non-blocking query, `UINT32_MAX` = wait indefinitely).
+- `out_payload`: Destination buffer receiving the completed payload copy (optional, can be `NULL`).
+- `out_status`: Receives integer status code (`0` = `CFUTURE_OK`, or an error code like `CFUTURE_ERR_TIMEOUT`, `CFUTURE_ERR_DROPPED`, `CFUTURE_ERR_ABANDONED`) (optional, can be `NULL`).
 - **Returns**: `true` if completed successfully; `false` on timeout, worker abort, or abandonment.
 - **Lifecycle Effect**: Releases the consumer reference ($2 \to 1$ or $1 \to 0$).
 
 ```c
-bool cfuture_is_ready(const cfuture_t *future);
-cfuture_state_t cfuture_get_state(const cfuture_t *future);
+void cfuture_abandon(cfuture_t *future);
 ```
-Non-blocking inspection of the current slot completion state.
-
-```c
-void cfuture_drop(cfuture_t *future);
-```
-Explicitly abandons the future without waiting. Transitions pending slot to `CFUTURE_STATE_ABANDONED` and decrements consumer reference.
+Explicitly abandons the future without waiting.
+- Transitions pending slot to `CFUTURE_STATE_ABANDONED` and decrements consumer reference.
+- Invalidates the `future` handle immediately upon return.
 
 ---
 
 ### Producer (Promise) Operations
 
 ```c
-void cpromise_set_value(cpromise_t *promise, const void *value, int32_t status_code);
-void cpromise_set_value_from_isr(cpromise_t *promise, const void *value, int32_t status_code);
+void cpromise_set_value(cpromise_t *promise, const void *payload, int32_t status_code);
+void cpromise_set_value_from_isr(cpromise_t *promise, const void *payload, int32_t status_code);
 ```
-Fulfills the promise with a payload and error code.
-- If slot is `CFUTURE_STATE_PENDING`: Copies `value` into slot arena, transitions state to `CFUTURE_STATE_COMPLETED`, signals OS event, and releases producer reference.
-- If slot is `CFUTURE_STATE_TIMEOUT` or `CFUTURE_STATE_ABANDONED`: **Discards copy**, skips event signal, and drops final producer reference ($1 \to 0$), recycling slot.
-- **`_from_isr` variant**: Reentrant and safe to call from hardware interrupt service routines.
+Fulfills the promise with a payload and status code.
+- If slot is `CFUTURE_STATE_PENDING`: Copies `payload` into slot arena, transitions state to `CFUTURE_STATE_COMPLETED`, signals OS event, and releases producer reference.
+- If slot is `CFUTURE_STATE_TIMEOUT` or `CFUTURE_STATE_ABANDONED`: **Discards copy**, skips event signal, and drops final producer reference ($1 \to 0$), safely recycling the slot.
+- **`_from_isr` variant**: Reentrant and safe to call from hardware interrupt service routines without blocking.
 
 ```c
 void cpromise_drop(cpromise_t *promise, int32_t status_code);
 void cpromise_drop_from_isr(cpromise_t *promise, int32_t status_code);
 ```
-Aborts the promise without a payload. Transitions pending slot to `CFUTURE_STATE_DROPPED`, sets error code, signals event, and releases producer reference.
+Aborts the promise without a payload (fails the waiting consumer).
+- Transitions pending slot to `CFUTURE_STATE_DROPPED`, sets status code (e.g. `CFUTURE_ERR_DROPPED`), signals event, and releases producer reference.
 
 ```c
 bool cpromise_is_active(const cpromise_t *promise);
@@ -529,18 +546,31 @@ Returns `true` if the slot is still in `CFUTURE_STATE_PENDING` (caller is active
 
 ---
 
-### Synchronization Provider Contract
+### Platform Abstraction Layer (PAL) Primitives
 
-Platform adapters implement `cfuture_sync_ops_t`:
+Declared in `include/cfuture_pal.h`:
 
-| Function Pointer | Expected Behavior | Execution Context |
-| :--- | :--- | :--- |
-| `event_create(void **ctx)` | Allocate or initialize OS binary event/semaphore | Task context only |
-| `event_destroy(void *ctx)` | Free OS event primitive | Task context only |
-| `event_set(void *ctx)` | Post/set event flag to wake waiting task | Task context |
-| `event_set_from_isr(void *ctx)` | Post event flag using kernel ISR-safe API | **Interrupt Context** |
-| `event_wait(void *ctx, uint32_t ms)` | Block caller until event is signaled or timeout | Task context only |
-| `event_reset(void *ctx)` | Manually clear event flag before reuse | Task context |
+```c
+uint32_t cfuture_pal_time_ms(void);
+void cfuture_pal_cpu_relax(void);
+```
+- `cfuture_pal_time_ms`: Returns monotonic clock in milliseconds. Provides bounded termination for polling waits without RTOS timers. Weakly bound on Cortex-M to allow board glue (`HAL_GetTick()`) or fallback monotonic tick counter.
+- `cfuture_pal_cpu_relax`: Issues architecture-appropriate low-power yield. Emits Thumb-2 `yield` instruction on ARM Cortex-M, `sched_yield()` on POSIX, or `YieldProcessor()` on Win32.
+
+---
+
+### Synchronization Provider Contract (OSAL)
+
+Platform adapters implement `cfuture_sync_ops_t` (`include/cfuture_osal.h`):
+
+| Function Pointer | Expected Behavior | Execution Context | Optional? |
+| :--- | :--- | :--- | :--- |
+| `void *(*event_create)(void)` | Allocates/initializes OS binary event/semaphore | Task context only | Required |
+| `void (*event_destroy)(void *event_handle)` | Frees OS event primitive | Task context only | Required |
+| `void (*event_set)(void *event_handle)` | Signals event to wake waiting task | Task context | Required |
+| `bool (*event_wait)(void *event_handle, uint32_t timeout_ms)` | Blocks caller until signaled or timeout. Returns `true` on signal | Task context only | Required |
+| `void (*event_reset)(void *event_handle)` | Clears event flag before slot reuse | Task context | Optional (can be `NULL`) |
+| `void (*event_set_from_isr)(void *event_handle)` | Signals event using kernel ISR-safe API | **Interrupt Context** | Optional (falls back to `event_set` if `NULL`) |
 
 ---
 
@@ -548,17 +578,23 @@ Platform adapters implement `cfuture_sync_ops_t`:
 
 ```c
 // 1. Declare static memory buffers
-CFUTURE_DEFINE_STATIC_BUFFERS(BufferName, Capacity, PayloadSizeBytes);
+CFUTURE_DEFINE_STATIC_BUFFERS(pool_name, payload_type, capacity);
 
 // 2. Generate type-safe inline wrapper API
-CFUTURE_DEFINE_TYPED_POOL(Prefix, PayloadType, Capacity)
+CFUTURE_DEFINE_TYPED_POOL(subsystem_name, payload_type, pool_capacity);
 ```
 
 Generates:
-- `Prefix_pool_t`, `Prefix_promise_t`, `Prefix_future_t`
-- `bool Prefix_create(Prefix_pool_t *pool, Prefix_promise_t *p, Prefix_future_t *f)`
-- `bool Prefix_promise_set(Prefix_promise_t *p, const PayloadType *val, int32_t err)`
-- `bool Prefix_future_wait(Prefix_future_t *f, uint32_t ms, PayloadType *out_val, int32_t *out_err)`
+- `subsystem_name##_future_t`
+- `subsystem_name##_promise_t`
+- `bool subsystem_name##_create(cfuture_pool_t *pool, subsystem_name##_promise_t *p, subsystem_name##_future_t *f)`
+- `bool subsystem_name##_future_wait(subsystem_name##_future_t *f, uint32_t timeout_ms, payload_type *out_val, int32_t *out_status)`
+- `void subsystem_name##_future_abandon(subsystem_name##_future_t *f)`
+- `bool subsystem_name##_promise_is_active(const subsystem_name##_promise_t *p)`
+- `void subsystem_name##_promise_set(subsystem_name##_promise_t *p, const payload_type *val, int32_t status_code)`
+- `void subsystem_name##_promise_drop(subsystem_name##_promise_t *p, int32_t status_code)`
+- `void subsystem_name##_promise_set_from_isr(subsystem_name##_promise_t *p, const payload_type *val, int32_t status_code)`
+- `void subsystem_name##_promise_drop_from_isr(subsystem_name##_promise_t *p, int32_t status_code)`
 
 ---
 
@@ -590,7 +626,7 @@ typedef struct
 } storage_response_t;
 
 // Statically allocate pool memory: 0 bytes dynamic allocation
-CFUTURE_DEFINE_STATIC_BUFFERS(s_storage, STORAGE_QUEUE_CAPACITY, sizeof(storage_response_t));
+CFUTURE_DEFINE_STATIC_BUFFERS(s_storage, storage_response_t, STORAGE_QUEUE_CAPACITY);
 static cfuture_pool_t s_storage_pool;
 
 // --- Shared Storage Servicer Task (T_S) ---
@@ -606,7 +642,7 @@ void storage_servicer_task_loop(void *queue_handle)
         if (!cpromise_is_active(&req.promise))
         {
             // Skip expensive flash erase & write!
-            cpromise_drop(&req.promise, -1); // Safely recycles slot
+            cpromise_drop(&req.promise, CFUTURE_ERR_DROPPED); // Safely recycles slot
             continue;
         }
 
@@ -651,7 +687,7 @@ bool save_audio_sample_safe(uint32_t sector, const uint8_t *data, uint32_t timeo
     if (cfuture_wait_for(&future, timeout_ms, &result, &status_code))
     {
         // Success: result contains valid payload
-        return (status_code == 0);
+        return (status_code == CFUTURE_OK);
     }
 
     // TIMEOUT OR CANCELLATION:
@@ -792,9 +828,10 @@ Measured on release library build (`gcc 13.3.0 -O3 -DNDEBUG`):
 ```text
 --- Binary Footprint (size libcfuture.a) ---
    text    data     bss     dec     hex filename
-   2925       0       0    2925     b6d cfuture.c.o
-   1928      48     128    2104     838 cfuture_polling.c.o
-    974      48   12337   13359    342f cfuture_posix.c.o
+   5368       0       0    5368    14f8 cfuture.c.o
+    249       0       0     249      f9 cfuture_pal.c.o
+    153       0       0     153      99 cfuture_polling.c.o
+   1609      48   12329   13986    36a2 cfuture_posix.c.o
 ```
 
 - **Core ROM Footprint**: **2,925 bytes** (< 3 KB).
@@ -896,12 +933,15 @@ nix develop
 ├── flake.nix                     # Hermetic Nix flake environment definition
 ├── include/
 │   ├── cfuture.h                 # Master public C11 future/promise API & typed macros
+│   ├── cfuture_osal.h            # Pluggable OSAL synchronization table interface
+│   ├── cfuture_pal.h             # Platform Abstraction Layer (monotonic time & CPU relax)
 │   └── adapters/
 │       ├── cfuture_posix.h       # POSIX pthreads synchronization adapter
 │       ├── cfuture_win32.h       # Native Win32 events synchronization adapter
 │       └── cfuture_polling.h     # Atomic polling bare-metal adapter
 ├── src/
 │   ├── cfuture.c                 # Core lock-free slot pool and state machine implementation
+│   ├── cfuture_pal.c             # Platform Abstraction Layer default implementations
 │   └── adapters/
 │       ├── cfuture_posix.c       # POSIX synchronization implementation
 │       ├── cfuture_win32.c       # Win32 synchronization implementation

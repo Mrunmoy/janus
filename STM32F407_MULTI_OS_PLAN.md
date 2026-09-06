@@ -14,34 +14,33 @@
 Instead of managing multiple git branches, this repository uses a **unified single-branch architecture**. All RTOS kernels live under `third_party/`, and the build system conditionally compiles the selected OSAL (Operating System Abstraction Layer) and PAL (Platform Abstraction Layer).
 
 ```
-stm32f407/
+stm32f407-threadx/
 ├── CMakeLists.txt              # Root build orchestrator (selects OSAL/PAL via -DTARGET_OS=...)
 ├── build.py                    # Unified CLI script (--os, --build, --flash, --stats, --clean)
 ├── README.md                   # Hardware setup, wiring, flashing, and quickstart guide
 ├── external/
-│   └── cfuture/                # Git submodule (libcfuture C11 core library)
+│   └── cfuture/                # Git submodule / vendored libcfuture C11 core library
 ├── third_party/
 │   ├── fatfs/                  # ChaN's FatFS (ff.c, ff.h, diskio.h)
 │   ├── stm32f4_hal/            # STM32F4 HAL + USB Host Core + USBH MSC Class
-│   ├── freertos/               # FreeRTOS Kernel (Source/, portable/GCC/ARM_CM4F/)
 │   └── threadx/                # Eclipse ThreadX (common/, ports/cortex_m4/gnu/)
-├── include/
-│   ├── app_config.h            # Buffer sizes, pool capacity, timeouts
-│   ├── osal.h                  # Pure OS Abstraction (queues, events, tasks, delays)
-│   ├── pal_storage.h           # Platform Abstraction for Block Storage / USB Host
-│   └── storage_service.h       # Shared Storage Task & Command Protocol
-└── src/
-    ├── main.c                  # Unified main entry point (spawns tasks via OSAL)
-    ├── storage_service.c       # Identical Storage Servicer Task (TS)
-    ├── client_tasks.c          # Identical Requesters (Happy path, timeout, cancellation, ABA isolation)
-    ├── osal/
-    │   ├── osal_posix.c        # Host OSAL (pthreads, cond vars, cfuture_posix)
-    │   ├── osal_freertos.c     # FreeRTOS OSAL (QueueHandle_t, EventGroupHandle_t)
-    │   ├── osal_threadx.c      # ThreadX OSAL (TX_QUEUE, TX_EVENT_FLAGS_GROUP)
-    │   └── osal_zephyr.c       # Zephyr OSAL (k_msgq, k_event)
-    └── pal/
-        ├── pal_host_disk.c     # Host RAM-disk / file-backed image driver for FatFS
-        └── pal_stm32f4_usb.c   # Hardware STM32 USB Host MSC driver for FatFS
+└── app/
+    ├── include/
+    │   ├── app_config.h        # Buffer sizes, pool capacity, real-time deadlines
+    │   ├── osal/               # OSAL interfaces: osal_sync.h, osal_thread.h
+    │   ├── pal/                # Unified PAL interfaces: pal_led.h, pal_log.h, pal_storage.h, pal_time.h
+    │   ├── core/               # Application coordination: app_main.h
+    │   ├── diagnostics/        # Heartbeat & telemetry: heartbeat_task.h
+    │   ├── storage/            # Shared Storage Servicer: storage_service.h
+    │   └── usb/                # Hardware USB host state machine: usb_host_app.h
+    └── src/
+        ├── main.c              # Main application entry point
+        ├── osal/               # Target OSAL implementations (ThreadX, POSIX)
+        ├── pal/                # Concrete PAL implementations (STM32 hardware, Host disk/stdio)
+        ├── core/               # System bootstrap & client task runners
+        ├── diagnostics/        # LED blinking & UART logging telemetry
+        ├── storage/            # Storage Servicer Task (TS)
+        └── usb/                # STM32 USB OTG MSC event handling
 ```
 
 ### Key Architectural Principle
