@@ -42,6 +42,7 @@ The library eliminates the three classical failure modes of embedded asynchronou
   - [Workflow 3: Late Completion Discard (Worker Completes After Timeout)](#workflow-3-late-completion-discard-worker-completes-after-timeout)
   - [Workflow 4: Hardware Interrupt (ISR) Promise Fulfillment](#workflow-4-hardware-interrupt-isr-promise-fulfillment)
 - [6. API Reference & Functional Specification](#6-api-reference--functional-specification)
+  - [Status and Error Codes](#status-and-error-codes)
   - [Pool Management](#pool-management)
   - [Future & Promise Creation](#future--promise-creation)
   - [Consumer (Future) Operations](#consumer-future-operations)
@@ -461,6 +462,22 @@ sequenceDiagram
 ---
 
 ## 6. API Reference & Functional Specification
+
+### Status and Error Codes
+
+`libcfuture` error codes follow standard UNIX/POSIX negative errno conventions. They map directly to standard system return codes without translation layers:
+
+| Symbolic Code | Standard UNIX Value | Description |
+| :--- | :--- | :--- |
+| `CFUTURE_OK` | `0` | Success / normal fulfillment |
+| `CFUTURE_ERR_TIMEOUT` | `-ETIMEDOUT` (`-110`) | Operation timed out before fulfillment |
+| `CFUTURE_ERR_DROPPED` | `-ECANCELED` (`-125`) | Worker dropped/aborted promise without fulfilling |
+| `CFUTURE_ERR_ABANDONED` | `-ECONNABORTED` (`-103`) | Consumer explicitly abandoned the future |
+| `CFUTURE_ERR_PARAM` | `-EINVAL` (`-22`) | Invalid parameter passed to API |
+| `CFUTURE_ERR_FULL` | `-ENOSPC` (`-28`) | Static pool bitmask saturated (all slots occupied) |
+| `CFUTURE_ERR_INVALID` | `-EINVAL` (`-22`) | Handle or slot state corrupted / invalid |
+
+---
 
 ### Pool Management
 
