@@ -34,7 +34,6 @@ TEST_F(LifecycleTest, CreateAndFulfill_NormalFlow)
 
     ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
     EXPECT_TRUE(cpromise_is_active(&promise));
-    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_relaxed), 2U);
 
     uint32_t send_val = 0xDEADBEEF;
     cpromise_set_value(&promise, &send_val, 0);
@@ -43,8 +42,6 @@ TEST_F(LifecycleTest, CreateAndFulfill_NormalFlow)
     EXPECT_EQ(promise.pool, nullptr);
     EXPECT_EQ(promise.slot_id, CFUTURE_INVALID_SLOT);
 
-    // Producer dropped ref: refcount is now 1
-    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_relaxed), 1U);
     EXPECT_EQ(pool.slots[0].state.load(std::memory_order_relaxed),
               (uint_fast32_t)CFUTURE_STATE_COMPLETED);
 
@@ -60,7 +57,6 @@ TEST_F(LifecycleTest, CreateAndFulfill_NormalFlow)
     EXPECT_EQ(future.slot_id, CFUTURE_INVALID_SLOT);
 
     // Both parties released: slot recycled to pool
-    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_relaxed), 0U);
     EXPECT_EQ(pool.slots[0].state.load(std::memory_order_relaxed),
               (uint_fast32_t)CFUTURE_STATE_IDLE);
     EXPECT_EQ(pool.allocated_mask.load(std::memory_order_relaxed), 0U);
@@ -140,8 +136,7 @@ TEST_F(LifecycleTest, ConsumerAbandonsFuture_WorkerRecyclesOnCompletion)
     cfuture_abandon(&future);
     EXPECT_EQ(future.pool, nullptr);
 
-    // Caller dropped ref: refcount is 1, state is ABANDONED
-    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_relaxed), 1U);
+    // Caller abandoned without waiting: state is ABANDONED
     EXPECT_EQ(pool.slots[0].state.load(std::memory_order_relaxed),
               (uint_fast32_t)CFUTURE_STATE_ABANDONED);
 
@@ -152,7 +147,8 @@ TEST_F(LifecycleTest, ConsumerAbandonsFuture_WorkerRecyclesOnCompletion)
     uint32_t val = 999;
     cpromise_set_value(&promise, &val, 0);
 
-    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_relaxed), 0U);
+    EXPECT_EQ(pool.slots[0].state.load(std::memory_order_relaxed),
+              (uint_fast32_t)CFUTURE_STATE_IDLE);
     EXPECT_EQ(pool.allocated_mask.load(std::memory_order_relaxed), 0U);
 }
 

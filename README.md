@@ -508,8 +508,8 @@ Explicitly abandons the future without waiting. Transitions pending slot to `CFU
 ### Producer (Promise) Operations
 
 ```c
-bool cpromise_set_value(cpromise_t *promise, const void *value, int32_t error_code);
-bool cpromise_set_value_from_isr(cpromise_t *promise, const void *value, int32_t error_code);
+void cpromise_set_value(cpromise_t *promise, const void *value, int32_t status_code);
+void cpromise_set_value_from_isr(cpromise_t *promise, const void *value, int32_t status_code);
 ```
 Fulfills the promise with a payload and error code.
 - If slot is `CFUTURE_STATE_PENDING`: Copies `value` into slot arena, transitions state to `CFUTURE_STATE_COMPLETED`, signals OS event, and releases producer reference.
@@ -517,8 +517,8 @@ Fulfills the promise with a payload and error code.
 - **`_from_isr` variant**: Reentrant and safe to call from hardware interrupt service routines.
 
 ```c
-bool cpromise_drop(cpromise_t *promise, int32_t error_code);
-bool cpromise_drop_from_isr(cpromise_t *promise, int32_t error_code);
+void cpromise_drop(cpromise_t *promise, int32_t status_code);
+void cpromise_drop_from_isr(cpromise_t *promise, int32_t status_code);
 ```
 Aborts the promise without a payload. Transitions pending slot to `CFUTURE_STATE_DROPPED`, sets error code, signals event, and releases producer reference.
 
@@ -646,12 +646,12 @@ bool save_audio_sample_safe(uint32_t sector, const uint8_t *data, uint32_t timeo
 
     // 3. Block waiting for result with strict real-time deadline
     storage_response_t result;
-    int32_t error_code = 0;
+    int32_t status_code = 0;
 
-    if (cfuture_wait_for(&future, timeout_ms, &result, &error_code))
+    if (cfuture_wait_for(&future, timeout_ms, &result, &status_code))
     {
         // Success: result contains valid payload
-        return (error_code == 0);
+        return (status_code == 0);
     }
 
     // TIMEOUT OR CANCELLATION:

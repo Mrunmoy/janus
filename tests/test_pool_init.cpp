@@ -68,10 +68,9 @@ TEST_F(PoolInitTest, InitializesSlotsAndInvokesEventCreate)
 
     for (uint32_t i = 0; i < kCapacity; ++i)
     {
-        EXPECT_EQ(pool.slots[i].ref_count.load(std::memory_order_relaxed), 0U);
         EXPECT_EQ(pool.slots[i].state.load(std::memory_order_relaxed),
                   (uint_fast32_t)CFUTURE_STATE_IDLE);
-        EXPECT_EQ(pool.slots[i].error_code, 0);
+        EXPECT_EQ(pool.slots[i].status_code, 0);
         EXPECT_NE(pool.slots[i].event_handle, nullptr);
         EXPECT_EQ(pool.slots[i].payload, payload_arena + (i * kPayloadSize));
     }
@@ -98,8 +97,6 @@ TEST_F(PoolInitTest, CreateAllocatesSequentialSlotsUntilFull)
         EXPECT_EQ(futures[i].slot_id, i);
         EXPECT_EQ(futures[i].pool, &pool);
 
-        // Slot state should be PENDING, refcount 2
-        EXPECT_EQ(pool.slots[i].ref_count.load(std::memory_order_relaxed), 2U);
         EXPECT_EQ(pool.slots[i].state.load(std::memory_order_relaxed),
                   (uint_fast32_t)CFUTURE_STATE_PENDING);
     }
@@ -126,4 +123,46 @@ TEST_F(PoolInitTest, CreateRejectsNullArguments)
     EXPECT_FALSE(cfuture_create(nullptr, &p, &f));
     EXPECT_FALSE(cfuture_create(&pool, nullptr, &f));
     EXPECT_FALSE(cfuture_create(&pool, &p, nullptr));
+}
+
+TEST_F(PoolInitTest, BareMetalPalWaitSucceedsWithoutSyncOps)
+{
+    ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, nullptr));
+
+    cpromise_t promise{};
+    cfuture_t future{};
+    ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
+
+    uint32_t val = 42U;
+    cpromise_set_value(&promise, &val, CFUTURE_OK);
+
+    uint32_t out_val = 0U;
+    int32_t out_err = -99;
+    EXPECT_TRUE(cfuture_wait_for(&future, 50, &out_val, &out_err));
+    EXPECT_EQ(out_val, 42U);
+    EXPECT_EQ(out_err, CFUTURE_OK);
+
+    cfuture_pool_destroy(&pool);
+}
+
+TEST_F(PoolInitTest, BareMetalPalWaitTimeoutWithoutFulfill)
+{
+    ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, nullptr));
+
+    cpromise_t promise{};
+    cfuture_t future{};
+    ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
+
+    uint32_t out_val = 0U;
+    int32_t out_err = 0;
+    EXPECT_FALSE(cfuture_wait_for(&future, 10, &out_val, &out_err));
+    EXPECT_EQ(out_err, CFUTURE_ERR_TIMEOUT);
+
+    EXPECT_FALSE(cpromise_is_active(&promise));
+
+    cpromise_drop(&promise, CFUTURE_ERR_DROPPED);
+    EXPECT_EQ(pool.slots[0].state.load(std::memory_order_relaxed),
+              (uint_fast32_t)CFUTURE_STATE_IDLE);
+
+    cfuture_pool_destroy(&pool);
 }

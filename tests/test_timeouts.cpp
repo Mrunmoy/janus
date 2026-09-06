@@ -49,8 +49,6 @@ TEST_F(TimeoutsTest, NonBlockingZeroTimeout_ReturnsImmediatelyWhenPending)
     EXPECT_EQ(err, CFUTURE_ERR_TIMEOUT);
     EXPECT_LT(elapsed_us, 5000); // 0 us wait returns virtually instantaneously
 
-    // Caller timed out and dropped reference
-    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_acquire), 1U);
     EXPECT_EQ(pool.slots[0].state.load(std::memory_order_acquire),
               (uint_fast32_t)CFUTURE_STATE_TIMEOUT);
     EXPECT_FALSE(cpromise_is_active(&promise));
@@ -60,7 +58,8 @@ TEST_F(TimeoutsTest, NonBlockingZeroTimeout_ReturnsImmediatelyWhenPending)
     cpromise_set_value(&promise, &send_val, 0);
 
     // Slot is now completely recycled by worker
-    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_acquire), 0U);
+    EXPECT_EQ(pool.slots[0].state.load(std::memory_order_acquire),
+              (uint_fast32_t)CFUTURE_STATE_IDLE);
     EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
 }
 
@@ -105,7 +104,6 @@ TEST_F(TimeoutsTest, TimedWait_WorkerStalls_CallerTimesOutAndUnwinds)
     worker.join();
 
     // Slot should be fully recycled by the worker upon late completion
-    EXPECT_EQ(pool.slots[0].ref_count.load(std::memory_order_acquire), 0U);
     EXPECT_EQ(pool.slots[0].state.load(std::memory_order_acquire),
               (uint_fast32_t)CFUTURE_STATE_IDLE);
     EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);

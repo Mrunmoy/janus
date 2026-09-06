@@ -58,6 +58,7 @@ endif()
 # Core library
 add_library(cfuture STATIC
     src/cfuture.c
+    src/cfuture_pal.c
     ${CFUTURE_PLATFORM_SOURCES}
 )
 
