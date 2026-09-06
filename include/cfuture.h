@@ -88,9 +88,9 @@ extern "C"
     {
         cfuture_atomic_uint_fast32_t ref_count; /**< Dual-owner refcount: 2 -> 1 -> 0. */
         cfuture_atomic_uint_fast32_t state;     /**< Current state (cfuture_state_t). */
-        int32_t error_code;                     /**< Result status / error code (0 = success). */
-        void *event_handle;                     /**< Injected OSAL synchronization handle. */
-        uint8_t *payload;                       /**< Pointer into pool payload arena. */
+        int32_t status_code; /**< Result status code (0 = success / CFUTURE_OK). */
+        void *event_handle;  /**< Injected OSAL synchronization handle. */
+        uint8_t *payload;    /**< Pointer into pool payload arena. */
     } cfuture_slot_t;
 
     /* Forward declaration of pool container. */
@@ -167,11 +167,12 @@ extern "C"
      * @param[in,out] future      The future handle. Invalidated upon return.
      * @param[in]     timeout_ms  Timeout in milliseconds (0 = non-blocking, UINT32_MAX = forever).
      * @param[out]    out_payload Buffer to copy result payload into (optional, can be NULL).
-     * @param[out]    out_error   Receives error code set by producer (optional, can be NULL).
+     * @param[out]    out_status  Receives status code (0 = success) or error code (optional, can be
+     * NULL).
      * @return true if completed successfully, false if timed out, dropped, or invalid.
      */
     bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
-                          int32_t *out_error);
+                          int32_t *out_status);
 
     /**
      * @brief Explicitly abandons a future without waiting.
@@ -193,9 +194,9 @@ extern "C"
      *
      * @param[in,out] promise    The promise handle. Invalidated upon return.
      * @param[in]     payload    Result data to copy into pool slot (optional if payload_size == 0).
-     * @param[in]     error_code Status code (0 = success).
+     * @param[in]     status_code Status code (0 = success / CFUTURE_OK).
      */
-    void cpromise_set_value(cpromise_t *promise, const void *payload, int32_t error_code);
+    void cpromise_set_value(cpromise_t *promise, const void *payload, int32_t status_code);
 
     /**
      * @brief Drops the promise without fulfilling (fails the waiting consumer).
@@ -210,9 +211,9 @@ extern "C"
      *
      * @param[in,out] promise    The promise handle. Invalidated upon return.
      * @param[in]     payload    Result data to copy into pool slot (optional if payload_size == 0).
-     * @param[in]     error_code Status code (0 = success).
+     * @param[in]     status_code Status code (0 = success / CFUTURE_OK).
      */
-    void cpromise_set_value_from_isr(cpromise_t *promise, const void *payload, int32_t error_code);
+    void cpromise_set_value_from_isr(cpromise_t *promise, const void *payload, int32_t status_code);
 
     /**
      * @brief Drops the promise from an Interrupt Service Routine (ISR).
@@ -250,9 +251,9 @@ extern "C"
     }                                                                                              \
     static inline bool subsystem_name##_future_wait(subsystem_name##_future_t *f,                  \
                                                     uint32_t timeout_ms, payload_type *out_val,    \
-                                                    int32_t *out_err)                              \
+                                                    int32_t *out_status)                           \
     {                                                                                              \
-        return cfuture_wait_for((cfuture_t *)f, timeout_ms, (void *)out_val, out_err);             \
+        return cfuture_wait_for((cfuture_t *)f, timeout_ms, (void *)out_val, out_status);          \
     }                                                                                              \
     static inline void subsystem_name##_future_abandon(subsystem_name##_future_t *f)               \
     {                                                                                              \
@@ -263,9 +264,9 @@ extern "C"
         return cpromise_is_active((const cpromise_t *)p);                                          \
     }                                                                                              \
     static inline void subsystem_name##_promise_set(subsystem_name##_promise_t *p,                 \
-                                                    const payload_type *val, int32_t err)          \
+                                                    const payload_type *val, int32_t status)       \
     {                                                                                              \
-        cpromise_set_value((cpromise_t *)p, (const void *)val, err);                               \
+        cpromise_set_value((cpromise_t *)p, (const void *)val, status);                            \
     }                                                                                              \
     static inline void subsystem_name##_promise_drop(subsystem_name##_promise_t *p, int32_t err)   \
     {                                                                                              \
