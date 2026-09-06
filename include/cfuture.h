@@ -59,14 +59,65 @@ extern "C"
 /** Sentinel value representing an invalid or released slot ID. */
 #define CFUTURE_INVALID_SLOT ((uint8_t)0xFFU)
 
-/** Status and error codes. */
+#if defined(__has_include)
+#if __has_include(<errno.h>)
+#include <errno.h>
+#endif
+#endif
+
+/* Fallback definitions for platforms/headers without full POSIX errno macros.
+ * Scoped under CFUTURE_ prefix to avoid polluting the global reserved errno namespace. */
+#define CFUTURE_FALLBACK_ETIMEDOUT 110
+#define CFUTURE_FALLBACK_ECANCELED 125
+#define CFUTURE_FALLBACK_ECONNABORTED 103
+#define CFUTURE_FALLBACK_EINVAL 22
+#define CFUTURE_FALLBACK_ENOSPC 28
+
+/** Status and error codes matching standard UNIX/POSIX errno conventions. */
 #define CFUTURE_OK ((int32_t)0)
-#define CFUTURE_ERR_TIMEOUT ((int32_t)-1)
-#define CFUTURE_ERR_DROPPED ((int32_t)-2)
-#define CFUTURE_ERR_ABANDONED ((int32_t)-3)
-#define CFUTURE_ERR_PARAM ((int32_t)-4)
-#define CFUTURE_ERR_FULL ((int32_t)-5)
-#define CFUTURE_ERR_INVALID ((int32_t)-6)
+
+#if defined(ETIMEDOUT)
+#define CFUTURE_ERR_TIMEOUT ((int32_t)-ETIMEDOUT) /**< Operation timed out (-ETIMEDOUT). */
+#else
+#define CFUTURE_ERR_TIMEOUT                                                                        \
+    ((int32_t)-CFUTURE_FALLBACK_ETIMEDOUT) /**< Operation timed out (-ETIMEDOUT). */
+#endif
+
+#if defined(ECANCELED)
+#define CFUTURE_ERR_DROPPED                                                                        \
+    ((int32_t)-ECANCELED) /**< Promise dropped / cancelled by worker (-ECANCELED). */
+#else
+#define CFUTURE_ERR_DROPPED                                                                        \
+    ((int32_t)-CFUTURE_FALLBACK_ECANCELED) /**< Promise dropped / cancelled by worker              \
+                                              (-ECANCELED). */
+#endif
+
+#if defined(ECONNABORTED)
+#define CFUTURE_ERR_ABANDONED                                                                      \
+    ((int32_t)-ECONNABORTED) /**< Future abandoned by caller (-ECONNABORTED). */
+#else
+#define CFUTURE_ERR_ABANDONED                                                                      \
+    ((int32_t)-CFUTURE_FALLBACK_ECONNABORTED) /**< Future abandoned by caller (-ECONNABORTED). */
+#endif
+
+#if defined(EINVAL)
+#define CFUTURE_ERR_PARAM ((int32_t)-EINVAL)   /**< Invalid function parameter (-EINVAL). */
+#define CFUTURE_ERR_INVALID ((int32_t)-EINVAL) /**< Handle or slot state invalid (-EINVAL). */
+#else
+#define CFUTURE_ERR_PARAM                                                                          \
+    ((int32_t)-CFUTURE_FALLBACK_EINVAL) /**< Invalid function parameter (-EINVAL). */
+#define CFUTURE_ERR_INVALID                                                                        \
+    ((int32_t)-CFUTURE_FALLBACK_EINVAL) /**< Handle or slot state invalid (-EINVAL). */
+#endif
+
+#if defined(ENOSPC)
+#define CFUTURE_ERR_FULL ((int32_t)-ENOSPC) /**< Static pool capacity saturated (-ENOSPC). */
+#elif defined(ENOMEM)
+#define CFUTURE_ERR_FULL ((int32_t)-ENOMEM) /**< Static pool capacity saturated (-ENOMEM). */
+#else
+#define CFUTURE_ERR_FULL                                                                           \
+    ((int32_t)-CFUTURE_FALLBACK_ENOSPC) /**< Static pool capacity saturated (-ENOSPC). */
+#endif
 
     /**
      * @brief Internal lifecycle states of a pool slot.

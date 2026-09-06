@@ -16,38 +16,39 @@ Instead of managing multiple git branches, this repository uses a **unified sing
 ```
 stm32f407/
 ├── CMakeLists.txt              # Root build orchestrator (selects OSAL/PAL via -DTARGET_OS=...)
-├── build.py                    # Unified CLI script (--os, --build, --flash, --stats, --clean)
+├── build.py                    # Unified CLI script (--target {host,freertos,threadx,zephyr}, --build, --flash, --stats, --clean)
 ├── README.md                   # Hardware setup, wiring, flashing, and quickstart guide
 ├── external/
-│   └── cfuture/                # Git submodule (libcfuture C11 core library)
+│   └── cfuture/                # Git submodule / vendored libcfuture C11 core library
 ├── third_party/
 │   ├── fatfs/                  # ChaN's FatFS (ff.c, ff.h, diskio.h)
 │   ├── stm32f4_hal/            # STM32F4 HAL + USB Host Core + USBH MSC Class
 │   ├── freertos/               # FreeRTOS Kernel (Source/, portable/GCC/ARM_CM4F/)
-│   └── threadx/                # Eclipse ThreadX (common/, ports/cortex_m4/gnu/)
-├── include/
-│   ├── app_config.h            # Buffer sizes, pool capacity, timeouts
-│   ├── osal.h                  # Pure OS Abstraction (queues, events, tasks, delays)
-│   ├── pal_storage.h           # Platform Abstraction for Block Storage / USB Host
-│   └── storage_service.h       # Shared Storage Task & Command Protocol
-└── src/
-    ├── main.c                  # Unified main entry point (spawns tasks via OSAL)
-    ├── storage_service.c       # Identical Storage Servicer Task (TS)
-    ├── client_tasks.c          # Identical Requesters (Happy path, timeout, cancellation, ABA isolation)
-    ├── osal/
-    │   ├── osal_posix.c        # Host OSAL (pthreads, cond vars, cfuture_posix)
-    │   ├── osal_freertos.c     # FreeRTOS OSAL (QueueHandle_t, EventGroupHandle_t)
-    │   ├── osal_threadx.c      # ThreadX OSAL (TX_QUEUE, TX_EVENT_FLAGS_GROUP)
-    │   └── osal_zephyr.c       # Zephyr OSAL (k_msgq, k_event)
-    └── pal/
-        ├── pal_host_disk.c     # Host RAM-disk / file-backed image driver for FatFS
-        └── pal_stm32f4_usb.c   # Hardware STM32 USB Host MSC driver for FatFS
+│   ├── threadx/                # Eclipse ThreadX (common/, ports/cortex_m4/gnu/)
+│   └── zephyr/                 # Zephyr RTOS integration glue
+└── app/
+    ├── include/
+    │   ├── app_config.h        # Buffer sizes, pool capacity, real-time deadlines
+    │   ├── osal/               # OSAL interfaces: osal_sync.h, osal_thread.h
+    │   ├── pal/                # Unified PAL interfaces: pal_led.h, pal_log.h, pal_storage.h, pal_time.h
+    │   ├── core/               # Application coordination: app_main.h
+    │   ├── diagnostics/        # Heartbeat & telemetry: heartbeat_task.h
+    │   ├── storage/            # Shared Storage Servicer: storage_service.h
+    │   └── usb/                # Hardware USB host state machine: usb_host_app.h
+    └── src/
+        ├── main.c              # Main application entry point
+        ├── osal/               # Target OSAL implementations (osal_posix.c, osal_freertos.c, osal_threadx.c, osal_zephyr.c)
+        ├── pal/                # Concrete PAL implementations (pal_host_disk.c, pal_stm32f4_usb.c)
+        ├── core/               # System bootstrap & client task runners
+        ├── diagnostics/        # LED blinking & UART logging telemetry
+        ├── storage/            # Storage Servicer Task (TS)
+        └── usb/                # STM32 USB OTG MSC event handling
 ```
 
 ### Key Architectural Principle
 **Zero application code differences between Host, FreeRTOS, ThreadX, and Zephyr.**
-- `src/main.c`, `src/storage_service.c`, and `src/client_tasks.c` are 100% identical across all targets.
-- The `TARGET_OS` CMake variable selects the corresponding `osal_<target>.c` and `pal_<target>.c`.
+- `app/src/main.c`, `app/src/storage/storage_service.c`, and `app/src/storage/client_tasks.c` are 100% identical across all targets.
+- The `TARGET_OS` CMake variable selects the corresponding `app/src/osal/osal_<target>.c` and `app/src/pal/pal_<target>.c`.
 
 ---
 
@@ -129,30 +130,30 @@ def main():
   ```bash
   git submodule add https://github.com/Mrunmoy/janus.git external/cfuture
   ```
-- **Task 1.2**: Create `include/osal.h` defining:
+- **Task 1.2**: Create `app/include/osal/` defining:
   - `cfuture_sync_ops_t` getter for the active OS.
   - Generic message queue: `osal_queue_create`, `osal_queue_send`, `osal_queue_receive`.
   - Generic task creation: `osal_task_create`, `osal_delay_ms`, `osal_get_time_ms`.
-- **Task 1.3**: Create `include/pal_storage.h` defining block storage initialization, read, write, and FatFS disk status hooks.
+- **Task 1.3**: Create `app/include/pal/` defining unified PAL interfaces (`PalLed`, `PalTimeSource`, `PalLogSink`, `PalStorage`) and block storage initialization, read, write, and FatFS disk status hooks.
 - **Task 1.4**: Integrate ChaN's FatFS under `third_party/fatfs/` (`ff.c`, `ff.h`, `diskio.h`, `ffconf.h`).
 - **Task 1.5**: Implement common application files:
-  - `src/storage_service.c`: Shared Servicer Task $T_S$ with `cpromise_is_active()` cancellation check.
-  - `src/client_tasks.c`: Client Tasks executing the 4 test scenarios (Happy Path, Queue Timeout Cancellation, Late Completion Discard, Queue ABA Slot Isolation).
-  - `src/main.c`: Initializes PAL, mounts FatFS volume, spawns tasks via OSAL, prints UART banner.
+  - `app/src/storage/storage_service.c`: Shared Servicer Task $T_S$ with `cpromise_is_active()` cancellation check.
+  - `app/src/storage/client_tasks.c`: Client Tasks executing the 4 test scenarios (Happy Path, Queue Timeout Cancellation, Late Completion Discard, Queue ABA Slot Isolation).
+  - `app/src/main.c`: Initializes PAL, mounts FatFS volume, spawns tasks via OSAL, prints UART banner.
 
 ### Phase 2: Host OS Desktop Target (`host`)
-- **Task 2.1**: Implement `src/osal/osal_posix.c` using standard pthreads, condition variables, and `external/cfuture/src/adapters/cfuture_posix.c`.
-- **Task 2.2**: Implement `src/pal/pal_host_disk.c` using a 64 MB RAM-backed or image-backed FatFS block driver.
+- **Task 2.1**: Implement `app/src/osal/osal_posix.c` using standard pthreads, condition variables, and `external/cfuture/src/adapters/cfuture_posix.c`.
+- **Task 2.2**: Implement `app/src/pal/pal_host_disk.c` using a 64 MB RAM-backed or image-backed FatFS block driver.
 - **Task 2.3**: Configure CMake for Host target:
   - Default target: `add_executable(storage_demo_host ...)`
   - Run natively via `./build.py --os host --run` and verify all 4 scenarios pass on the host desktop without hardware!
 
 ### Phase 3: FreeRTOS + STM32 USB Host Target (`freertos`)
 - **Task 3.1**: Add FreeRTOS kernel under `third_party/freertos/` and STM32 HAL under `third_party/stm32f4_hal/`.
-- **Task 3.2**: Implement `src/osal/osal_freertos.c`:
+- **Task 3.2**: Implement `app/src/osal/osal_freertos.c`:
   - `cfuture_sync_ops_t` backed by FreeRTOS `EventGroupHandle_t` (`xEventGroupCreate`, `xEventGroupSetBits`, `xEventGroupWaitBits`).
   - Queue backed by FreeRTOS `QueueHandle_t`.
-- **Task 3.3**: Implement `src/pal/pal_stm32f4_usb.c`:
+- **Task 3.3**: Implement `app/src/pal/pal_stm32f4_usb.c`:
   - Configure STM32 USB OTG FS Host stack (`usbh_core.c`, `usbh_msc.c`).
   - Connect FatFS `diskio.c` to `USBH_MSC_Read` / `USBH_MSC_Write`.
 - **Task 3.4**: Configure CMake cross-compilation with `arm-none-eabi-gcc`:
@@ -163,15 +164,15 @@ def main():
 
 ### Phase 4: Eclipse / Azure RTOS ThreadX Target (`threadx`)
 - **Task 4.1**: Add ThreadX kernel under `third_party/threadx/` (`common/src/`, `ports/cortex_m4/gnu/`).
-- **Task 4.2**: Implement `src/osal/osal_threadx.c`:
+- **Task 4.2**: Implement `app/src/osal/osal_threadx.c`:
   - `cfuture_sync_ops_t` backed by ThreadX `TX_EVENT_FLAGS_GROUP` (`tx_event_flags_create`, `tx_event_flags_set`, `tx_event_flags_get`).
   - Queue backed by ThreadX `TX_QUEUE`.
-- **Task 4.3**: Reuse `src/pal/pal_stm32f4_usb.c` and FatFS.
+- **Task 4.3**: Reuse `app/src/pal/pal_stm32f4_usb.c` and FatFS.
 - **Task 4.4**: Configure CMake target `storage_demo_threadx.elf` and test flashing.
 
 ### Phase 5: Zephyr RTOS Target (`zephyr`)
 - **Task 5.1**: Provide Zephyr application configuration (`prj.conf`, `app.overlay` for USB Host).
-- **Task 5.2**: Implement `src/osal/osal_zephyr.c`:
+- **Task 5.2**: Implement `app/src/osal/osal_zephyr.c`:
   - `cfuture_sync_ops_t` backed by Zephyr `k_event`.
   - Queue backed by Zephyr `k_msgq`.
 - **Task 5.3**: Build via `west build -b nucleo_f407zg` wrapped in `build.py --os zephyr --build`.
