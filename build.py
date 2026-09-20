@@ -230,6 +230,12 @@ def run_docs_check(build_dir="build"):
             line_no = readme.count("\n", 0, match.start()) + 1
             problems.append(f"README line {line_no} still says '{match.group(0)}' (slots use hold bits)")
 
+    # Mermaid reads '#' as the start of an entity code and silently drops the rest of the text.
+    for block in re.finditer(r"```mermaid\n(.*?)```", readme, flags=re.S):
+        if "#" in block.group(1):
+            line_no = readme.count("\n", 0, block.start() + block.group(0).index("#")) + 1
+            problems.append(f"README line {line_no}: '#' inside a mermaid block truncates the label")
+
     # Test suites: each file listed, and the stated suite count correct.
     suites = sorted(glob.glob(os.path.join(SCRIPT_DIR, "tests", "test_*.cpp")))
     for path in suites:

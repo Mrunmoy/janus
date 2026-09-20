@@ -330,23 +330,23 @@ The library provides macro-generated type-safe pools via `CFUTURE_DEFINE_TYPED_P
 
 ### State Transition Diagram
 
-Every slot transitions deterministically across six discrete states (`IDLE`, `PENDING`, `COMPLETED`, `DROPPED`, `TIMEOUT`, `ABANDONED`):
+Every slot transitions deterministically across six discrete states (`IDLE`, `PENDING`, `COMPLETED`, `DROPPED`, `TIMEOUT`, `ABANDONED`). Labels are the API calls without their `cfuture_` / `cpromise_` prefix (`timeout` is `cfuture_wait_for()` reaching its deadline); `create()` sets both holds, `cancel()` applies only to an undispatched pair, and a resolved slot returns to `IDLE` once both holds are released:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> IDLE : Pool Initialization
-    IDLE --> PENDING : cfuture_create() [both holds set]
-    
-    PENDING --> COMPLETED : cpromise_set_value() [Success]
-    PENDING --> DROPPED : cpromise_drop() [Worker Abort]
-    PENDING --> TIMEOUT : cfuture_wait_for() [Deadline Expired]
-    PENDING --> ABANDONED : cfuture_abandon() [Caller Terminated]
-    PENDING --> IDLE : cfuture_cancel() [Undispatched Pair]
+    [*] --> IDLE : pool init
+    IDLE --> PENDING : create()
+    PENDING --> IDLE : cancel()
 
-    COMPLETED --> IDLE : Both Holds Released
-    DROPPED --> IDLE : Both Holds Released
-    TIMEOUT --> IDLE : Both Holds Released
-    ABANDONED --> IDLE : Both Holds Released
+    PENDING --> COMPLETED : set_value()
+    PENDING --> DROPPED : drop()
+    PENDING --> TIMEOUT : timeout
+    PENDING --> ABANDONED : abandon()
+
+    COMPLETED --> IDLE : holds released
+    DROPPED --> IDLE : holds released
+    TIMEOUT --> IDLE : holds released
+    ABANDONED --> IDLE : holds released
 ```
 
 ---
@@ -385,7 +385,7 @@ sequenceDiagram
     participant P as cfuture Pool
 
     A->>P: cfuture_create(&pool, &promise, &future)
-    Note over P: Claims Slot #0<br/>State = PENDING<br/>Holds: consumer + producer
+    Note over P: Claims Slot 0<br/>State = PENDING<br/>Holds: consumer + producer
     A->>Q: os_queue_send(&cmd_with_promise)
     A->>P: cfuture_wait_for(&future, 100ms, &result)
     Note over A: Blocks on OS sync event
@@ -394,7 +394,7 @@ sequenceDiagram
     S->>P: cpromise_set_value(&promise, &data, 0)
     Note over P: Copies data to slot arena<br/>State -> COMPLETED<br/>Signals OS event<br/>Releases producer hold
     P-->>A: OS Event Unblocks T_A
-    Note over A: Reads payload copy from slot<br/>Releases consumer hold (last)<br/>Recycles Slot #0 into bitmask
+    Note over A: Reads payload copy from slot<br/>Releases consumer hold (last)<br/>Recycles Slot 0 into bitmask
     A->>A: Continues with valid result
 ```
 
@@ -413,7 +413,7 @@ sequenceDiagram
     participant S as Servicer Task (T_S)
     participant P as cfuture Pool
 
-    A->>P: cfuture_create(&pool, &promise_A, &future_A) -> Claims Slot #0
+    A->>P: cfuture_create(&pool, &promise_A, &future_A) -> Claims Slot 0
     A->>Q: os_queue_send(&cmd_A)
     A->>P: cfuture_wait_for(&future_A, 25ms, &result)
     Note over S: Servicer delayed by high-priority work...
@@ -421,12 +421,12 @@ sequenceDiagram
     Note over A: T_A unwinds its call stack safely.
     Note over B: Task T_B arrives and requests a slot!
     B->>P: cfuture_create(&pool, &promise_B, &future_B)
-    Note over P: Slot #0 is STILL ALLOCATED (producer hold)<br/>Claims Slot #1 for T_B!<br/>ZERO ABA HAZARD!
+    Note over P: Slot 0 is STILL ALLOCATED (producer hold)<br/>Claims Slot 1 for T_B!<br/>ZERO ABA HAZARD!
     Q->>S: Servicer finally pops cmd_A from queue
     S->>P: cpromise_is_active(&promise_A)
     Note over S: Returns false (detected TIMEOUT)!<br/>Skips expensive hardware work!
     S->>P: cpromise_drop(&promise_A, CFUTURE_ERR_DROPPED)
-    Note over P: Releases producer hold (last)<br/>Slot #0 recycled into bitmask!
+    Note over P: Releases producer hold (last)<br/>Slot 0 recycled into bitmask!
 ```
 
 ---
@@ -442,14 +442,14 @@ sequenceDiagram
     participant S as Servicer Task (T_S)
     participant P as cfuture Pool
 
-    A->>P: cfuture_create() -> Slot #3 (both holds)
+    A->>P: cfuture_create() -> Slot 3 (both holds)
     A->>S: Dispatches hardware request
     A->>P: cfuture_wait_for(timeout=30ms)
     S->>S: Servicer begins 50ms Flash Sector Erase...
     Note over A: 30ms expires: TIMEOUT!<br/>Releases consumer hold<br/>T_A exits function!
     Note over S: 50ms: Flash Erase completes!
     S->>P: cpromise_set_value(&promise, &result, 0)
-    Note over P: Observes state is TIMEOUT<br/>Discards payload copy!<br/>Releases producer hold (last)<br/>Recycles Slot #3 into bitmask!
+    Note over P: Observes state is TIMEOUT<br/>Discards payload copy!<br/>Releases producer hold (last)<br/>Recycles Slot 3 into bitmask!
     Note over S: Servicer continues loop normally.<br/>Zero memory leaks, zero corrupted pointers.
 ```
 
@@ -466,7 +466,7 @@ sequenceDiagram
     participant ISR as Hardware DMA ISR
     participant P as cfuture Pool
 
-    App->>P: cfuture_create() -> Slot #1
+    App->>P: cfuture_create() -> Slot 1
     App->>App: Configures Peripheral DMA buffer
     App->>P: cfuture_wait_for(timeout=100ms)
     Note over App: Task blocks on OS event
@@ -475,7 +475,7 @@ sequenceDiagram
     Note over P: Lock-free atomic state -> COMPLETED<br/>Calls event_set_from_isr()<br/>Releases producer hold
     ISR-->>App: Scheduler yields to waiting Task
     P-->>App: Unblocks with completed status
-    Note over App: Releases consumer hold (last)<br/>Slot #1 recycled
+    Note over App: Releases consumer hold (last)<br/>Slot 1 recycled
 ```
 
 ---
