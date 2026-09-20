@@ -1,5 +1,7 @@
 # Master Implementation Plan: Unified Multi-RTOS STM32F407 USB Storage Showcase
 
+> **Status note**: this is the original plan for the companion repository, <https://github.com/Mrunmoy/STM32F407VGT6>, which now exists and vendors `janus` under `external/cfuture`. The plan is kept for reference and may be out of date: for example it names the MCU STM32F407ZGT6, while that repository's linker scripts target the STM32F407VG. It records intent, not verified results.
+
 > **Target Audience**: Autonomous Embedded Firmware Developer / Engineer  
 > **Repository Type**: Single-Branch Unified Multi-Target Hardware Showcase Repository  
 > **Core Dependency**: `janus` (`libcfuture`) as a Git submodule at `external/cfuture`  
@@ -134,7 +136,7 @@ def main():
   - `cfuture_sync_ops_t` getter for the active OS.
   - Generic message queue: `osal_queue_create`, `osal_queue_send`, `osal_queue_receive`.
   - Generic task creation: `osal_task_create`, `osal_delay_ms`, `osal_get_time_ms`.
-  - A real millisecond tick behind `cfuture_pal_time_ms()` on every target (link `HAL_GetTick()` or override the weak symbol). `janus` times every `cfuture_wait_for()` deadline with it, including waits on an injected OSAL event; the `event_wait` result is only a wakeup hint. Each `cfuture_sync_ops_t` should also provide `event_reset`.
+  - A real millisecond tick behind `cfuture_pal_time_ms()` on every target (link `HAL_GetTick()` or override the weak symbol). With a real tick, `janus` times every `cfuture_wait_for()` deadline with it, including waits on an injected OSAL event (whose `event_wait` result is then only a wakeup hint). If the tick is provided by overriding `cfuture_pal_time_ms()` rather than by `HAL_GetTick()`, also override `cfuture_pal_clock_is_real()` to return `true`. Each `cfuture_sync_ops_t` must latch a set that arrives before the wait and should provide `event_reset`.
 - **Task 1.3**: Create `app/include/pal/` defining unified PAL interfaces (`PalLed`, `PalTimeSource`, `PalLogSink`, `PalStorage`) and block storage initialization, read, write, and FatFS disk status hooks.
 - **Task 1.4**: Integrate ChaN's FatFS under `third_party/fatfs/` (`ff.c`, `ff.h`, `diskio.h`, `ffconf.h`).
 - **Task 1.5**: Implement common application files:
