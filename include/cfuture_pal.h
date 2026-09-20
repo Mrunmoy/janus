@@ -4,7 +4,7 @@
  *
  * Provides hardware- and platform-level primitives:
  * - Monotonic elapsed time in milliseconds
- * - Low-power CPU relax / yield (e.g. Thumb-2 YIELD hint on ARM Cortex-M)
+ * - A CPU relax hint for polling loops (Thumb-2 YIELD on ARM Cortex-M, which executes as a NOP)
  *
  * Designed for microcontrollers and multi-threaded systems with zero dynamic memory allocation.
  *
@@ -24,8 +24,8 @@ extern "C"
     /**
      * @brief Reads the monotonic hardware clock in milliseconds.
      *
-     * Times every cfuture_wait_for() deadline, in polling mode and when an OSAL event
-     * backend is injected (the backend's wait result is only a wakeup hint).
+     * Times cfuture_wait_for() deadlines in polling mode only. With an OSAL event backend
+     * the backend's own timeout is the time base and this clock is not consulted.
      * Default implementations provide POSIX clock_gettime() or Win32 GetTickCount64().
      * On ARM Cortex-M, weakly calls HAL_GetTick() if linked, or advances a monotonic
      * fallback counter to guarantee bounded timeout termination if unlinked. That
@@ -39,9 +39,14 @@ extern "C"
     /**
      * @brief Relaxes the CPU core while waiting for events.
      *
-     * On ARM Cortex-M microcontrollers, this executes the Thumb-2 YIELD hint instruction
-     * to relax the instruction pipeline without the check-then-sleep race condition
-     * of WFI. On host/desktop platforms, this yields execution to other threads.
+     * Called on every iteration of a polling wait. Defaults: Thumb-2 YIELD on ARM Cortex-M
+     * (a NOP hint: it saves no power and does not run an RTOS scheduler; chosen over WFI to
+     * avoid its check-then-sleep race), sched_yield() on POSIX, and YieldProcessor() on Win32
+     * (a spin-wait pause hint that does not give up the timeslice).
+     *
+     * Polling mode therefore busy-waits. Under a priority-preemptive RTOS, override this weak
+     * function with the RTOS yield/delay call (or inject an event backend) if the producer
+     * can be a lower-priority task; otherwise that task never runs while a waiter polls.
      */
     void cfuture_pal_cpu_relax(void);
 

@@ -7,7 +7,8 @@
  *  2. Work Cancellation: T_S checks cpromise_is_active() before starting heavy work.
  *  3. Safe Late Completion: cpromise_set_value() safely handles caller timeouts.
  *  4. ABA Slot Isolation: Proves concurrent Task T_B cannot claim T_A's timed-out
- *     slot while T_A's request is still pending in T_S's queue.
+ *     slot while the servicer still holds T_A's promise (in flight in scenario 2,
+ *     still queued in scenario 2b).
  *  5. Hardware DMA / ISR Fulfillment: Demonstrates cpromise_set_value_from_isr().
  *  6. Undispatched Cancellation: cfuture_cancel() returns a pair's slot to the pool in
  *     one step when the request never reached the servicer.
@@ -289,9 +290,8 @@ int main(void)
                    err2);
         }
 
-        /* Concurrently, Task T_B arrives immediately while T_A's request is STILL in T_S's queue!
-         */
-        printf("\n[Task T_B] Arriving while T_A's request is still queued in T_S...\n");
+        /* Concurrently, Task T_B arrives while T_S still holds T_A's promise (mid-write). */
+        printf("\n[Task T_B] Arriving while T_S still holds T_A's promise...\n");
         cpromise_t p3 = {.slot_id = CFUTURE_INVALID_SLOT, .pool = NULL};
         cfuture_t f3 = {.slot_id = CFUTURE_INVALID_SLOT, .pool = NULL};
         if (cfuture_create(&s_nvm_pool, &p3, &f3))
@@ -299,8 +299,8 @@ int main(void)
             uint8_t slot_b = f3.slot_id;
             printf("[Task T_B] Claimed Slot %u! (Notice: Slot %u != Slot %u)\n", slot_b, slot_b,
                    slot_a);
-            printf("[Task T_B] -> ABA HAZARD PREVENTED: Slot %u remains locked until T_S pops "
-                   "T_A's promise!\n\n",
+            printf("[Task T_B] -> ABA HAZARD PREVENTED: Slot %u stays allocated until T_S "
+                   "resolves T_A's promise!\n\n",
                    slot_a);
 
             /* T_B's pair was never dispatched: release both ends in one step. */

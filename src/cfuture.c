@@ -35,6 +35,11 @@
 #define CFUTURE_PRODUCER_SIDE (CFUTURE_HOLD_PRODUCER | CFUTURE_CLAIM_RESOLVING)
 #define CFUTURE_CONSUMER_SIDE (CFUTURE_HOLD_CONSUMER | CFUTURE_CLAIM_WAITING)
 
+/* In event mode a stale signal makes the backend's wait return early, so the wait is
+ * re-issued, but only this many times: a latching backend that cannot be reset would
+ * otherwise spin. After that the wait falls back to polling against the PAL clock. */
+#define CFUTURE_STALE_SIGNAL_MAX ((uint32_t)2U)
+
 /* While one side claims, the other side can change owner at most twice (its own
  * claim, then its release), so a third strong-CAS attempt always decides. */
 #define CFUTURE_CLAIM_MAX_ATTEMPTS ((uint32_t)3U)
@@ -202,16 +207,19 @@ static uint8_t cfuture_pool_claim_slot(cfuture_pool_t *pool)
 static inline void cfuture_notify_consumer(cfuture_pool_t *pool, cfuture_slot_t *slot,
                                            bool from_isr)
 {
-    if (pool->sync_ops.event_set && slot->event_handle)
+    if (!slot->event_handle)
     {
-        if (from_isr && pool->sync_ops.event_set_from_isr)
-        {
-            pool->sync_ops.event_set_from_isr(slot->event_handle);
-        }
-        else
-        {
-            pool->sync_ops.event_set(slot->event_handle);
-        }
+        return;
+    }
+
+    /* Guard the function actually called: an ISR-only backend may leave event_set NULL. */
+    if (from_isr && pool->sync_ops.event_set_from_isr)
+    {
+        pool->sync_ops.event_set_from_isr(slot->event_handle);
+    }
+    else if (pool->sync_ops.event_set)
+    {
+        pool->sync_ops.event_set(slot->event_handle);
     }
 }
 
@@ -535,51 +543,57 @@ bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
 
     if (st == (uint_fast32_t)CFUTURE_STATE_PENDING)
     {
-        /* Only the slot state and the PAL clock decide when the wait is over. An OSAL
-         * wait may return early without a signal (spurious condvar wakeup, RTOS wait
-         * error, adapter that caps long waits), so its result is only a wakeup hint.
-         * Expiry is strict (elapsed > timeout) because the millisecond clock truncates:
-         * a wait may overshoot by one tick but never fires early. */
-        const bool use_event = pool->sync_ops.event_wait && slot->event_handle;
+        /* Event mode: the backend's own timeout is the time base. It is the OS's timer,
+         * whereas the PAL clock may be absent, mis-scaled or merely counting calls on a
+         * given port, and re-issuing waits against such a clock multiplies the timeout.
+         * A false return from a finite wait therefore means "the timeout elapsed".
+         * A true return with nothing resolved is a stale signal: clear it and wait again,
+         * a bounded number of times.
+         *
+         * Polling mode (no event): the PAL clock is the only time base. Expiry is strict
+         * (elapsed > timeout) because the millisecond clock truncates, so a polled wait
+         * overshoots by at least one tick but never fires early. */
+        bool use_event = pool->sync_ops.event_wait && slot->event_handle;
+        uint32_t stale_signals = 0U;
         const uint32_t start_ms = cfuture_pal_time_ms();
-        uint32_t remaining_ms = timeout_ms;
 
         while (timeout_ms != 0U && atomic_load_explicit(&slot->state, memory_order_acquire) ==
                                        (uint_fast32_t)CFUTURE_STATE_PENDING)
         {
-            if (timeout_ms != UINT32_MAX)
+            if (use_event)
             {
-                uint32_t elapsed_ms = cfuture_pal_time_ms() - start_ms;
-                if (elapsed_ms > timeout_ms)
+                if (!pool->sync_ops.event_wait(slot->event_handle, timeout_ms))
                 {
-                    break;
+                    if (timeout_ms != UINT32_MAX)
+                    {
+                        break;
+                    }
+
+                    /* A forever-wait cannot time out, so this was a failed wait: retry. */
+                    cfuture_pal_cpu_relax();
                 }
-                /* +1 covers the truncated tick, but must never grow into UINT32_MAX,
-                 * which backends read as "forever". */
-                remaining_ms = (timeout_ms - elapsed_ms) + 1U;
-                if (remaining_ms == UINT32_MAX)
+                else if (atomic_load_explicit(&slot->state, memory_order_acquire) ==
+                         (uint_fast32_t)CFUTURE_STATE_PENDING)
                 {
-                    remaining_ms = UINT32_MAX - 1U;
+                    /* A real signal racing this reset is not lost: the state re-check at the
+                     * top of the loop is the truth. */
+                    if (pool->sync_ops.event_reset)
+                    {
+                        pool->sync_ops.event_reset(slot->event_handle);
+                    }
+
+                    ++stale_signals;
+                    use_event = (stale_signals <= CFUTURE_STALE_SIGNAL_MAX);
                 }
+                continue;
             }
 
-            if (!use_event || !pool->sync_ops.event_wait(slot->event_handle, remaining_ms))
+            if (timeout_ms != UINT32_MAX && (cfuture_pal_time_ms() - start_ms) > timeout_ms)
             {
-                /* Polling mode, or an unsignaled return: yield rather than spin hot. */
-                cfuture_pal_cpu_relax();
+                break;
             }
-            else if (atomic_load_explicit(&slot->state, memory_order_acquire) ==
-                     (uint_fast32_t)CFUTURE_STATE_PENDING)
-            {
-                /* Signaled but nothing resolved: a stale signal. Latching (manual-reset)
-                 * backends would report it forever, so clear it. A real signal racing this
-                 * reset is not lost, because the state re-check above is the truth. */
-                if (pool->sync_ops.event_reset)
-                {
-                    pool->sync_ops.event_reset(slot->event_handle);
-                }
-                cfuture_pal_cpu_relax();
-            }
+
+            cfuture_pal_cpu_relax();
         }
 
         st = atomic_load_explicit(&slot->state, memory_order_acquire);
@@ -610,10 +624,11 @@ bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
         return cfuture_consume_result(pool, slot_id, st, out_payload, out_status);
     }
 
+    /* Defensive only: TIMEOUT and ABANDONED are written solely under the consumer claim
+     * this call holds, so no other state can be observed here. */
     if (out_status)
     {
-        *out_status = (st == (uint_fast32_t)CFUTURE_STATE_TIMEOUT) ? CFUTURE_ERR_TIMEOUT
-                                                                   : CFUTURE_ERR_ABANDONED;
+        *out_status = CFUTURE_ERR_INVALID;
     }
 
     cfuture_slot_release_side(pool, slot_id, CFUTURE_CONSUMER_SIDE);

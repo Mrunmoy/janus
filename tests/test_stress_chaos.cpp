@@ -165,25 +165,16 @@ enum class SyncMode
     kHostileEvents,
 };
 
-// A legal-but-nasty OSAL: waits return early without a signal, report signals that
-// never happened, or cut the requested timeout short, and there is no event_reset.
-// The core may only trust slot state and the PAL clock, so every invariant must hold.
+// A legal-but-nasty OSAL: it regularly reports signals that never happened, and it has no
+// event_reset to clear them. It never returns false before the requested timeout, because
+// in event mode that return *is* the timeout. Every invariant must still hold.
 bool hostileEventWait(void *handle, uint32_t timeout_ms)
 {
     thread_local Rng rng{0xC0FFEE11U ^
                          (uint32_t)std::hash<std::thread::id>{}(std::this_thread::get_id())};
-    const uint32_t roll = rng.below(16);
-    if (roll < 4U)
-    {
-        return false;
-    }
-    if (roll < 6U)
+    if (rng.below(16) < 3U)
     {
         return true;
-    }
-    if (roll < 10U && timeout_ms > 1U && timeout_ms != UINT32_MAX)
-    {
-        timeout_ms = 1U + rng.below(timeout_ms);
     }
     return cfuture_posix_sync_ops()->event_wait(handle, timeout_ms);
 }

@@ -5,14 +5,14 @@
 [![Language: C11](https://img.shields.io/badge/Language-C11%20(ISO%2FIEC%209899%3A2011)-00599C.svg)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
 [![Dynamic Allocations: 0 Bytes](https://img.shields.io/badge/Dynamic%20Allocations-0%20Bytes%20(Zero--Heap)-brightgreen.svg)]()
 [![Concurrency: Lock--Free](https://img.shields.io/badge/Concurrency-Lock--Free%20Bitmask%20CAS-blueviolet.svg)]()
-[![Code Coverage: 97.9%](https://img.shields.io/badge/Line%20Coverage-97.9%25-brightgreen.svg)]()
-[![ThreadSanitizer Clean](https://img.shields.io/badge/ThreadSanitizer-Verified%20(100k%20Cycles)-success.svg)]()
-[![ASan & UBSan Clean](https://img.shields.io/badge/Sanitizers-ASan%20%7C%20UBSan%20Clean-success.svg)]()
-[![ROM Footprint: < 5 KB](https://img.shields.io/badge/ROM%20Footprint-%3C%205%20KB%20(4378%20Bytes)-orange.svg)]()
-[![RAM Mutable: 1 Word](https://img.shields.io/badge/RAM%20Mutable-1%20Word%20(.bss)-blue.svg)]()
+[![Line Coverage: 97.9%](https://img.shields.io/badge/Line%20Coverage-97.9%25%20(Linux%20host)-brightgreen.svg)]()
+[![ThreadSanitizer: suite passes](https://img.shields.io/badge/ThreadSanitizer-suite%20passes%20(Linux%20host)-success.svg)]()
+[![ASan & UBSan: suite passes](https://img.shields.io/badge/ASan%20%7C%20UBSan-suite%20passes%20(Linux%20host)-success.svg)]()
+[![Core code size: 1.7 KB on Cortex-M4](https://img.shields.io/badge/Core%20code-1.7%20KB%20(Cortex--M4%20--Os)-orange.svg)]()
+[![Library static RAM: 2 words on Cortex-M](https://img.shields.io/badge/Library%20static%20RAM-2%20words%20(Cortex--M)-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-`libcfuture` is a zero-heap, deterministic, lock-free future/promise library written in pure ISO C11. Engineered specifically for hard real-time embedded firmware, multi-core microcontrollers, and low-latency host systems, it provides safe asynchronous message passing and request-response pipelining between threads and Interrupt Service Routines (ISRs) without dynamic memory allocation, priority inversion, or dangling pointers.
+`libcfuture` is a zero-heap, lock-free future/promise library written in C11 (plus a few compiler builtins: `__builtin_ctz` / `_BitScanForward`, weak symbols, and one inline `yield`). It targets embedded firmware and host systems, and provides asynchronous request-response between threads and Interrupt Service Routines (ISRs) without dynamic memory allocation or dangling stack pointers. The core takes no locks and every loop in it is bounded; whether a wait can suffer priority inversion depends on the injected OSAL backend (see [Polling mode](#atomic-polling-adapter-bare-metal--no-os)).
 
 The library eliminates the three classical failure modes of embedded asynchronous queueing: **dangling stack pointer corruption** upon requester timeout, **Queue ABA slot collisions (TOCTOU races)** under rapid turnover, and **uncontrolled peripheral execution** for abandoned requests.
 
@@ -31,7 +31,7 @@ The library eliminates the three classical failure modes of embedded asynchronou
   - [Bounded-Time Bitmask CAS Allocation](#bounded-time-bitmask-cas-allocation)
   - [Platform Abstraction Layer (PAL - `cfuture_pal.h`)](#platform-abstraction-layer-pal---cfuture_palh)
   - [Dependency Injection OSAL (`cfuture_sync_ops_t`)](#dependency-injection-osal-cfuture_sync_ops_t)
-  - [Strict Interrupt (ISR) Reentrancy](#strict-interrupt-isr-reentrancy)
+  - [Fulfilment from Interrupt Context](#fulfilment-from-interrupt-context)
   - [Type Safety Without `void*` Casting](#type-safety-without-void-casting)
 - [4. Finite State Machine & Concurrency Mechanics](#4-finite-state-machine--concurrency-mechanics)
   - [State Transition Diagram](#state-transition-diagram)
@@ -60,9 +60,9 @@ The library eliminates the three classical failure modes of embedded asynchronou
   - [Atomic Polling Adapter (Bare-Metal / No-OS)](#atomic-polling-adapter-bare-metal--no-os)
   - [RTOS Targets (FreeRTOS, ThreadX, Zephyr)](#rtos-targets-freertos-threadx-zephyr)
 - [9. Microcontroller Porting & Silicon Guidelines](#9-microcontroller-porting--silicon-guidelines)
-  - [ARM Cortex-M Memory Placement & D-Cache Coherency](#arm-cortex-m-memory-placement--d-cache-coherency)
-  - [Cortex-M0/M0+ Bitmask Emulation](#cortex-m0m0-bitmask-emulation)
-  - [Multi-Core SMP Memory Barriers](#multi-core-smp-memory-barriers)
+  - [Data Cache and DMA (Cortex-M7 / M55 / M85)](#data-cache-and-dma-cortex-m7--m55--m85)
+  - [Cortex-M0/M0+ Atomics](#cortex-m0m0-atomics)
+  - [Multi-Core Payload Publication](#multi-core-payload-publication)
 - [10. Memory Footprint & Benchmark Telemetry](#10-memory-footprint--benchmark-telemetry)
   - [Static Memory Footprint](#static-memory-footprint)
   - [Latency & Throughput Benchmarks](#latency--throughput-benchmarks)
@@ -90,7 +90,7 @@ While standard RTOS queues deliver messages to the servicer, they provide no nat
 3. **Discarding late completions** if the servicer finishes after the caller has already unblocked and resumed execution.
 4. **Preventing slot recycling races** where a timed-out request slot is reassigned to a new caller while the servicer still holds a stale pointer to it.
 
-`libcfuture` provides a complete solution, verified by unit, sanitizer and randomised multi-threaded stress tests, using lock-free C11 atomic compare-and-swap (CAS) primitives and a dual-owner hold protocol with generation-tagged handles.
+`libcfuture` addresses these four points using lock-free C11 atomic compare-and-swap (CAS) primitives and a dual-owner hold protocol with generation-tagged handles. It is checked by unit tests, sanitizer runs and randomised multi-threaded stress tests on a Linux host; see [section 11](#11-verification-testing--static-analysis) for exactly what is and is not tested.
 
 ---
 
@@ -168,7 +168,7 @@ When an operation takes longer than the caller can tolerate, the servicer requir
 
 ### Architectural Layers
 
-`libcfuture` enforces strict unidirectional dependencies. The core library is pure C11 and has zero dependencies on any specific operating system, compiler runtime, or dynamic heap library:
+`libcfuture` enforces strict unidirectional dependencies. The core library depends on no operating system and no heap; from the toolchain it needs `<stdatomic.h>`, `memcpy`/`memset` and a count-trailing-zeros builtin:
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -208,35 +208,36 @@ There is no counter: a slot is owned while either bit is set, and whichever side
 graph TD
     INIT[Slot Allocated in Pool] -->|cfuture_create| RC2[Both Holds Set<br/>Consumer + Producer]
     
-    RC2 -->|Consumer Times Out / Drops First| RC1_CONS[Producer Hold Only<br/>Slot Locked: Unclaimable by Other Tasks]
+    RC2 -->|Consumer Times Out / Abandons First| RC1_CONS[Producer Hold Only<br/>Slot Locked: Unclaimable by Other Tasks]
     RC2 -->|Producer Fulfills / Drops First| RC1_PROD[Consumer Hold Only<br/>Slot Locked: Unclaimable by Other Tasks]
     
     RC1_CONS -->|Producer Later Releases Last Hold| RC0[No Holds Left<br/>Slot Safely Recycled into Bitmask]
     RC1_PROD -->|Consumer Reads & Releases Last Hold| RC0
+    RC2 -->|cfuture_cancel on an Undispatched Pair| RC0
 ```
 
 #### Why This Eliminates the Queue ABA Hazard
 When task $T_A$ times out, it clears only its own consumer hold; the producer hold is still set. **Crucially, the slot is NOT recycled back to the pool.** Because its bit remains set in `allocated_mask`, concurrent task $T_B$ **cannot claim this slot**. 
 
-Only when servicer task $T_S$ pops $T_A$'s request from the queue and releases the producer hold is the last hold gone. The final owner performs the atomic slot recycling, guaranteeing that a slot can never be reused while a handle to it remains inside an OS queue.
+Only when servicer task $T_S$ pops $T_A$'s request from the queue and releases the producer hold is the last hold gone. The final owner performs the slot recycling, so a slot cannot be reused while its producer hold is set. The one exception is a successful `cfuture_cancel()`, which recycles the slot at once; a promise copy still sitting in a queue is then rejected by its generation tag instead.
 
 #### Generation-Tagged Handles & Exclusive Claims
 Handles are plain structs and get copied (into queue messages, retry paths, ISR contexts), so the library also defends against a handle that is used twice or outlives its slot:
 
 - **Generation tag**: the `owner` word is `(generation << CFUTURE_GEN_SHIFT) | hold bits`. Every recycle bumps the generation (wrapping at `CFUTURE_GEN_MASK` and skipping 0, which is never valid). `cfuture_t` / `cpromise_t` carry the generation they were created with.
 - **Exclusive claim**: before touching a slot, `cpromise_set_value()` / `cpromise_drop()` claim the producer side and `cfuture_wait_for()` / `cfuture_abandon()` claim the consumer side with a single bounded CAS on `owner`. That one CAS verifies the generation, verifies the side's hold bit is still present, and sets the side's claim bit.
-- **Restart safety**: every `cfuture_pool_init()` starts its slots from a different generation, so a handle that survived a destroy + re-init of the same buffers (a subsystem restart with a request still queued) does not match the pool's new life.
-- **Limit**: the tag is 28 bits. A handle kept across exactly $2^{28}$ recycles of its own slot would match again; discard handles once they are spent instead of storing them.
+- **Restart spacing**: every `cfuture_pool_init()` (counted by one process-wide epoch) starts its slots from a different point of the 28-bit generation space, so a handle that survived a destroy + re-init of the same buffers does not match the pool's new life until that slot has been recycled enough times to reach the old generation (tens of millions of recycles with the current spacing). This is spacing, not a guarantee.
+- **Limit**: the tag is 28 bits and skips 0, so generations repeat every $2^{28}-1$ recycles of a slot. A handle kept that long would match again; discard handles once they are spent instead of storing them.
 - **Effect**: a stale handle (slot already recycled, possibly reallocated), a forged handle to an unallocated slot, or the second of two concurrent calls on copies of the same handle all fail the claim and become no-ops (`cfuture_wait_for()` reports `CFUTURE_ERR_INVALID`). They cannot write the payload arena, signal the event, complete the slot's next occupant, or double-release a hold.
 
 ---
 
 ### Bounded-Time Bitmask CAS Allocation
 
-Slot allocation is lock-free and operates on a single `atomic_uint_fast32_t allocated_mask` representing up to 32 concurrent slots (`CFUTURE_MAX_CAPACITY`):
+Slot allocation is lock-free and operates on a single `atomic_uint_fast32_t allocated_mask` representing up to 32 concurrent slots (`CFUTURE_MAX_CAPACITY`). Simplified from `cfuture_pool_claim_slot()` in `src/cfuture.c` (the real function uses `uint_fast32_t` locals and returns the slot index):
 
 ```c
-// Lock-free atomic bitmask allocation loop
+// Lock-free atomic bitmask allocation loop (simplified)
 uint32_t current_mask = atomic_load_explicit(&pool->allocated_mask, memory_order_relaxed);
 uint32_t retries = 0;
 
@@ -262,8 +263,8 @@ while (retries < CFUTURE_CAS_MAX_RETRIES)
 return false; // Contention budget exceeded
 ```
 
-- **Bounded Execution**: Bounded strictly by `CFUTURE_CAS_MAX_RETRIES` (1000 attempts), ensuring execution time is deterministic and compliant with hard real-time scheduling constraints.
-- **Fast-Path Bit Scan**: Leverages hardware Count Trailing Zeros (`__builtin_ctz` or `_BitScanForward`) for single-cycle slot discovery.
+- **Bounded Execution**: at most `CFUTURE_CAS_MAX_RETRIES` (1000 attempts) weak-CAS attempts; the constant is private to `cfuture.c`. The loop is bounded, not constant-time, and under heavy contention `cfuture_create()` can return `false` even though a slot is free.
+- **Bit Scan**: `__builtin_ctz` / `_BitScanForward`, a hardware bit-scan where the core has one (RBIT+CLZ on Cortex-M3/M4; a libgcc call on Cortex-M0).
 
 ---
 
@@ -271,13 +272,14 @@ return false; // Contention budget exceeded
 
 For hardware-level clock timing and instruction pipeline relaxation, `libcfuture` introduces an unopinionated Platform Abstraction Layer (`cfuture_pal.h` / `src/cfuture_pal.c`):
 
-- **Monotonic Hardware Clock (`cfuture_pal_time_ms`)**: Returns the platform's monotonic hardware time in milliseconds without requiring an RTOS timer service. It times every `cfuture_wait_for()` deadline, in polling mode and in OSAL event mode alike.
+- **Monotonic Hardware Clock (`cfuture_pal_time_ms`)**: Returns the platform's monotonic hardware time in milliseconds without requiring an RTOS timer service. It times `cfuture_wait_for()` deadlines in polling mode only; with an OSAL event backend the backend's own timeout is the time base and this clock is not consulted.
   - On **ARM Cortex-M**, it weakly hooks `HAL_GetTick()` if linked into the binary. If no board HAL or hardware timer is linked (e.g. during isolated unit testing or before clock init), it increments an internal fallback counter upon each query to guarantee that wait loops deterministically terminate rather than hanging in an infinite loop. **Note**: Because the unlinked fallback counter increments per query rather than in physical real time, real-time millisecond deadline accuracy requires providing a hardware timer or implementing `HAL_GetTick()`.
   - On host systems, it maps directly to `clock_gettime(CLOCK_MONOTONIC)` (POSIX) or `GetTickCount64()` (Win32).
-  - Target firmware can cleanly override `cfuture_pal_time_ms()` with their own high-resolution hardware timer.
+  - Target firmware can override the weak `cfuture_pal_time_ms()` with its own hardware timer.
+- **Why event mode ignores this clock**: a port's tick can be absent, call-counting, or mis-scaled while looking healthy. On-target testing of an earlier revision that timed event waits with this clock showed a 1,000 ms timeout taking 25 s on a ThreadX build whose `HAL_GetTick()` ran about 25x slow. The RTOS's own timed wait is the more trustworthy time base, so event mode uses it exclusively.
 - **CPU Relax / Pipeline Yield (`cfuture_pal_cpu_relax`)**:
-  - On **ARM Cortex-M**, it issues the Thumb-2 `yield` assembly hint instruction (`__asm__ volatile("yield" ::: "memory")`). This hints to the pipeline/interconnect to optimize power and bus arbitrations without introducing the check-then-sleep race conditions inherent to `WFI` (Wait For Interrupt).
-  - On host operating systems, it calls `sched_yield()` (POSIX) or `YieldProcessor()` (Win32) to relinquish the remaining timeslice to co-running threads.
+  - On **ARM Cortex-M**, it issues the Thumb-2 `yield` hint instruction, which executes as a NOP: it saves no power and does not invoke an RTOS scheduler (it was chosen over `WFI` to avoid that instruction's check-then-sleep race).
+  - On POSIX it calls `sched_yield()`. On Win32 it calls `YieldProcessor()`, a spin-wait `pause` hint that does not give up the timeslice.
 
 ---
 
@@ -288,19 +290,17 @@ The core (`cfuture.c`) contains zero OS `#ifdef` preprocessor directives; OS dif
 ```c
 typedef struct
 {
-    /** Allocates/initializes a synchronization primitive. */
+    /** Allocates/initializes one event per slot. */
     void *(*event_create)(void);
-    /** Destroys/releases a synchronization primitive. */
+    /** Destroys/releases an event (optional). */
     void (*event_destroy)(void *event_handle);
-    /** Signals the event from task context. */
+    /** Signals the event (task context; interrupt context too if event_set_from_isr is NULL). */
     void (*event_set)(void *event_handle);
     /** Waits for the event to be signaled, with timeout in ms (UINT32_MAX = forever).
-     *  Returns true if signaled. The result is only a wakeup hint: the core re-checks
-     *  slot state and the PAL clock after every return. */
+     *  Returns true if signaled; false from a finite wait means the timeout elapsed. */
     bool (*event_wait)(void *event_handle, uint32_t timeout_ms);
-    /** Resets the event to unsignaled state: before slot reuse, and when a wait reports a
-     *  signal although nothing resolved (optional, can be NULL; provide it for latching
-     *  / manual-reset events). */
+    /** Resets the event: before slot reuse, and when a wait reports a signal although nothing
+     *  resolved (optional, can be NULL; provide it for manual-reset events). */
     void (*event_reset)(void *event_handle);
     /** Signals the event from ISR context (optional; falls back to event_set if NULL). */
     void (*event_set_from_isr)(void *event_handle);
@@ -311,18 +311,18 @@ This permits testing identical embedded business logic on host developer worksta
 
 ---
 
-### Strict Interrupt (ISR) Reentrancy
+### Fulfilment from Interrupt Context
 
 Fulfilling a promise directly from a hardware interrupt service routine (e.g., DMA transfer complete, Timer capture, UART RX idle line) is natively supported via `cpromise_set_value_from_isr()`:
-- Bypasses blocking OS mutexes and context switches.
-- Dispatches through `sync_ops->event_set_from_isr()` (e.g., `xEventGroupSetBitsFromISR` on FreeRTOS or `tx_event_flags_set` on ThreadX).
+- The core path is a bounded CAS, a bounded `memcpy` and no blocking call; whether the signal itself is ISR-safe is the adapter's responsibility.
+- Dispatches through `sync_ops->event_set_from_isr()` when provided (e.g., `xEventGroupSetBitsFromISR` on FreeRTOS or `tx_event_flags_set` on ThreadX), otherwise through `event_set`.
 - Ensures lock-free atomic release of the producer hold.
 
 ---
 
 ### Type Safety Without `void*` Casting
 
-The library provides macro-generated type-safe pools via `CFUTURE_DEFINE_TYPED_POOL(Prefix, Type, Capacity)`. This generates dedicated inline wrapper functions that enforce payload type checking at compile time without runtime overhead or heap indirection.
+The library provides macro-generated type-safe pools via `CFUTURE_DEFINE_TYPED_POOL(Prefix, Type, Capacity)`. This generates inline wrapper functions whose payload pointers are typed, so passing the wrong payload type is a compile error; the pool's payload size is checked against `sizeof(Type)` at run time.
 
 ---
 
@@ -353,7 +353,7 @@ stateDiagram-v2
 
 ### State Transition Truth Table
 
-All state transitions are single atomic Compare-And-Swap (CAS) operations. If two threads race to transition a slot simultaneously, exactly one succeeds; the losing thread inspects the winning state and executes safe recovery:
+Every transition out of `PENDING` is a single atomic Compare-And-Swap (CAS); if two threads race, exactly one succeeds and the loser acts on the winning state. `IDLE -> PENDING` and the return to `IDLE` are plain atomic stores, made safe by the allocation bitmask and the holds rather than by a CAS:
 
 | Current State | Target State | Initiating Actor | API Invocation | Hold Effect | Payload Copied? | Event Signaled? |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -362,6 +362,8 @@ All state transitions are single atomic Compare-And-Swap (CAS) operations. If tw
 | `PENDING` | `DROPPED` | Producer / Worker | `cpromise_drop()` | Clears producer hold | No | **Yes** (`event_set`) |
 | `PENDING` | `TIMEOUT` | Consumer / Caller | `cfuture_wait_for()` | Clears consumer hold | No | No |
 | `PENDING` | `ABANDONED` | Consumer / Caller | `cfuture_abandon()` | Clears consumer hold | No | No |
+| `COMPLETED` / `DROPPED` | unchanged | Consumer / Caller | `cfuture_wait_for()` | Clears consumer hold | Copied **out** to caller on `COMPLETED` only | No |
+| `COMPLETED` / `DROPPED` | unchanged | Consumer / Caller | `cfuture_abandon()` | Clears consumer hold (result discarded) | No | No |
 | `PENDING` | `IDLE` | Requester (undispatched pair) | `cfuture_cancel()` | Clears both holds in one CAS (recycles) | No | No |
 | `TIMEOUT` | `TIMEOUT` | Producer / Worker | `cpromise_set_value()` / `cpromise_drop()` | Clears producer hold (last: recycles) | **No** (Discarded!) | No |
 | `ABANDONED` | `ABANDONED` | Producer / Worker | `cpromise_set_value()` / `cpromise_drop()` | Clears producer hold (last: recycles) | **No** (Discarded!) | No |
@@ -387,14 +389,14 @@ sequenceDiagram
     A->>P: cfuture_create(&pool, &promise, &future)
     Note over P: Claims Slot 0<br/>State = PENDING<br/>Holds: consumer + producer
     A->>Q: os_queue_send(&cmd_with_promise)
-    A->>P: cfuture_wait_for(&future, 100ms, &result)
+    A->>P: cfuture_wait_for(&future, 100, &result, &status)
     Note over A: Blocks on OS sync event
     Q->>S: os_queue_receive(&cmd)
     S->>S: Execute peripheral operation (e.g. Flash read)
     S->>P: cpromise_set_value(&promise, &data, 0)
     Note over P: Copies data to slot arena<br/>State -> COMPLETED<br/>Signals OS event<br/>Releases producer hold
     P-->>A: OS Event Unblocks T_A
-    Note over A: Reads payload copy from slot<br/>Releases consumer hold (last)<br/>Recycles Slot 0 into bitmask
+    Note over A: Reads payload copy from slot<br/>Releases consumer hold<br/>Slot 0 recycled once both holds are gone
     A->>A: Continues with valid result
 ```
 
@@ -415,7 +417,7 @@ sequenceDiagram
 
     A->>P: cfuture_create(&pool, &promise_A, &future_A) -> Claims Slot 0
     A->>Q: os_queue_send(&cmd_A)
-    A->>P: cfuture_wait_for(&future_A, 25ms, &result)
+    A->>P: cfuture_wait_for(&future_A, 25, &result, &status)
     Note over S: Servicer delayed by high-priority work...
     Note over A: 25ms Deadline Expires!<br/>CAS: PENDING -> TIMEOUT<br/>Releases consumer hold<br/>Returns false to caller!
     Note over A: T_A unwinds its call stack safely.
@@ -444,7 +446,7 @@ sequenceDiagram
 
     A->>P: cfuture_create() -> Slot 3 (both holds)
     A->>S: Dispatches hardware request
-    A->>P: cfuture_wait_for(timeout=30ms)
+    A->>P: cfuture_wait_for(&future, 30, &result, &status)
     S->>S: Servicer begins 50ms Flash Sector Erase...
     Note over A: 30ms expires: TIMEOUT!<br/>Releases consumer hold<br/>T_A exits function!
     Note over S: 50ms: Flash Erase completes!
@@ -468,14 +470,14 @@ sequenceDiagram
 
     App->>P: cfuture_create() -> Slot 1
     App->>App: Configures Peripheral DMA buffer
-    App->>P: cfuture_wait_for(timeout=100ms)
+    App->>P: cfuture_wait_for(&future, 100, &result, &status)
     Note over App: Task blocks on OS event
     Note over ISR: DMA Transfer Complete Interrupt Fires!
     ISR->>P: cpromise_set_value_from_isr(&promise, &dma_status, 0)
     Note over P: Lock-free atomic state -> COMPLETED<br/>Calls event_set_from_isr()<br/>Releases producer hold
     ISR-->>App: Scheduler yields to waiting Task
     P-->>App: Unblocks with completed status
-    Note over App: Releases consumer hold (last)<br/>Slot 1 recycled
+    Note over App: Releases consumer hold<br/>Slot 1 recycled once both holds are gone
 ```
 
 ---
@@ -493,10 +495,12 @@ sequenceDiagram
 | `CFUTURE_ERR_DROPPED` | `-ECANCELED` | Worker dropped/aborted promise without fulfilling |
 | `CFUTURE_ERR_ABANDONED` | `-ECONNABORTED` | Consumer explicitly abandoned the future |
 | `CFUTURE_ERR_PARAM` | `-EINVAL` | Invalid parameter passed to API |
-| `CFUTURE_ERR_FULL` | `-ENOSPC` | Static pool bitmask saturated (all slots occupied) |
+| `CFUTURE_ERR_FULL` | `-ENOSPC` (`-ENOMEM` if `ENOSPC` is undefined) | Static pool bitmask saturated (all slots occupied) |
 | `CFUTURE_ERR_INVALID` | `-EINVAL` | Handle is NULL, malformed, stale, duplicated, or already consumed |
 
-*Note: Exact numeric values are defined by the host/target platform C library (e.g. Linux, macOS, or toolchain libc fallback).*
+*Note: Exact numeric values are defined by the host/target platform C library and differ between them (e.g. `ETIMEDOUT` is 110 on Linux/glibc and 116 on newlib), so do not exchange raw codes between a host and a target.*
+
+`cfuture_wait_for()` itself only ever reports the worker's status code, `CFUTURE_ERR_TIMEOUT` or `CFUTURE_ERR_INVALID`. `CFUTURE_ERR_DROPPED`, `CFUTURE_ERR_ABANDONED`, `CFUTURE_ERR_PARAM` and `CFUTURE_ERR_FULL` are constants for application use (for example as the reason passed to `cpromise_drop()`); no library function returns them. `cfuture_create()` and `cfuture_pool_init()` report failure as `false`.
 
 ---
 
@@ -516,8 +520,8 @@ Initializes a static future pool.
 - `slots_buf`: Pointer to caller-allocated array of `cfuture_slot_t[capacity]`.
 - `payload_buf`: Pointer to caller-allocated buffer of `capacity * payload_size` bytes (can be `NULL` if `payload_size == 0`).
 - `sync_ops`: Pointer to OS synchronization adapter table (or `NULL` for bare-metal polling mode).
-- **Returns**: `true` on success, `false` on invalid parameters or failed event creation.
-- Every init starts the slots from a different generation, so handles left over from before a destroy + re-init of the same buffers are rejected. Not thread-safe: call before any task uses the pool.
+- **Returns**: `true` on success, `false` on invalid parameters or failed event creation. The bundled adapters draw events from process-wide static tables (128 on POSIX, `CFUTURE_POSIX_MAX_EVENTS`; 64 on Win32), shared by all pools: a fifth 32-slot POSIX pool fails to initialise.
+- Every init starts the slots from a different point of the generation space (see *Restart spacing* above). Not thread-safe against use of the same pool: call before any task uses it.
 
 ```c
 void cfuture_pool_destroy(cfuture_pool_t *pool);
@@ -534,7 +538,7 @@ bool cfuture_create(cfuture_pool_t *pool, cpromise_t *out_promise, cfuture_t *ou
 Atomically claims an available slot from the pool bitmask using lock-free CAS.
 - Sets both hold bits (consumer + producer) and state to `CFUTURE_STATE_PENDING`.
 - Populates `out_promise` and `out_future` handles, stamped with the slot's current generation.
-- **Returns**: `true` if a slot was allocated, `false` if the pool is saturated or contention budget exceeded.
+- **Returns**: `true` if a slot was allocated, `false` if the arguments are invalid, the pool is saturated, or the CAS retry budget was exhausted under contention.
 
 ---
 
@@ -545,12 +549,12 @@ bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
 ```
 Blocks the calling task until the promise is resolved, dropped, or the timeout expires.
 - `future`: The future handle. Invalidated upon return (`slot_id` set to `CFUTURE_INVALID_SLOT`, `pool` set to `NULL`, `generation` set to `0`).
-- `timeout_ms`: Timeout in milliseconds (`0` = non-blocking query, `UINT32_MAX` = wait indefinitely).
+- `timeout_ms`: Timeout in milliseconds. `UINT32_MAX` = wait indefinitely. `0` = do not wait: if the promise is not resolved yet, the future is timed out and consumed (`CFUTURE_ERR_TIMEOUT`) and a later result is discarded. There is no repeatable poll.
 - `out_payload`: Destination buffer receiving the completed payload copy (optional, can be `NULL`).
 - `out_status`: Receives the worker's status code (`0` = `CFUTURE_OK`, or whatever the worker passed to `cpromise_drop()`, e.g. `CFUTURE_ERR_DROPPED`), `CFUTURE_ERR_TIMEOUT` on timeout, or `CFUTURE_ERR_INVALID` for a NULL, stale, duplicated or already-consumed handle (optional, can be `NULL`).
 - **Returns**: `true` if completed successfully; `false` on timeout, worker abort, or an invalid handle.
 - **Lifecycle Effect**: Releases the consumer hold; if it was the last hold, the slot is recycled.
-- **Timeout guarantee**: the wait is decided only by the slot state and `cfuture_pal_time_ms()`. The OSAL `event_wait` result is treated as a wakeup hint, so spurious wakeups, failing waits, or adapters that cap long waits can never produce a false `CFUTURE_ERR_TIMEOUT`. A finite timeout never fires early (it may overshoot by one clock tick); `UINT32_MAX` really waits forever. Because the deadline is timed by the PAL clock even in OSAL event mode, that clock must be real: on Cortex-M link `HAL_GetTick()` or override `cfuture_pal_time_ms()` (the built-in fallback only counts calls). A stale signal on a latching (manual-reset) backend is cleared via `event_reset` rather than spun on.
+- **Timeout behaviour**: in OSAL event mode the backend's own timed wait is the time base: `cfuture_wait_for()` hands it `timeout_ms` and treats a `false` return as the timeout, so the wait is exactly as accurate as the backend and is never re-issued against another clock. A `true` return with nothing resolved is a stale signal: it is cleared through `event_reset` (when provided) and the wait is issued again, at most 2 times, after which the call falls back to polling; each such re-wait restarts the timeout, so stale signals can lengthen a wait but never shorten it. A `false` return from a `UINT32_MAX` wait is treated as a failed wait and retried. In polling mode the deadline is timed by `cfuture_pal_time_ms()`: it never fires early and overshoots by at least one clock tick, and it is only as accurate as that clock.
 
 ```c
 void cfuture_abandon(cfuture_t *future);
@@ -576,9 +580,10 @@ void cpromise_set_value(cpromise_t *promise, const void *payload, int32_t status
 void cpromise_set_value_from_isr(cpromise_t *promise, const void *payload, int32_t status_code);
 ```
 Fulfills the promise with a payload and status code.
+- **Every promise must be resolved exactly once** with `cpromise_set_value()` or `cpromise_drop()` (or the pair cancelled with `cfuture_cancel()`). A consumer timeout or abandon leaves the producer hold set; if the worker never resolves (lost message, task restart), that slot stays allocated until `cfuture_pool_destroy()` + re-init. The library has no reclaim timer.
 - If slot is `CFUTURE_STATE_PENDING`: Copies `payload` into slot arena (a `NULL` payload delivers a zero-filled one, never the slot's previous contents), transitions state to `CFUTURE_STATE_COMPLETED`, signals OS event, and releases the producer hold.
 - If slot is `CFUTURE_STATE_TIMEOUT` or `CFUTURE_STATE_ABANDONED`: **Discards copy**, skips event signal, and releases the producer hold (the last one), safely recycling the slot.
-- **`_from_isr` variant**: Reentrant and safe to call from hardware interrupt service routines without blocking. **Note on OSAL contract**: When using an OSAL synchronization adapter table (`cfuture_sync_ops_t`), `event_set_from_isr` must be populated with an interrupt-safe OS kernel API (e.g. `xEventGroupSetBitsFromISR` on FreeRTOS or `tx_event_flags_set` on ThreadX). If `event_set_from_isr` is `NULL`, `cfuture` falls back to `event_set`, which is only safe if the underlying adapter's `event_set` is safe to call from an ISR (such as in atomic polling mode).
+- **`_from_isr` variant**: Reentrant and safe to call from hardware interrupt service routines without blocking. **Note on OSAL contract**: When using an OSAL synchronization adapter table (`cfuture_sync_ops_t`), `event_set_from_isr` must be populated with an interrupt-safe OS kernel API (e.g. `xEventGroupSetBitsFromISR` on FreeRTOS or `tx_event_flags_set` on ThreadX). If `event_set_from_isr` is `NULL`, `cfuture` falls back to `event_set`, which is then called from interrupt context and must be ISR-safe. In polling mode both are `NULL` and nothing is called.
 
 ```c
 void cpromise_drop(cpromise_t *promise, int32_t status_code);
@@ -602,7 +607,7 @@ Declared in `include/cfuture_pal.h`:
 uint32_t cfuture_pal_time_ms(void);
 void cfuture_pal_cpu_relax(void);
 ```
-- `cfuture_pal_time_ms`: Times every wait deadline (polling and OSAL event mode). Returns monotonic elapsed time in milliseconds when linked with a platform timer (e.g. `HAL_GetTick()`, `clock_gettime()`, or `GetTickCount64()`). When unlinked on ARM Cortex-M, advances an internal fallback counter per call to guarantee bounded timeout termination; real-time millisecond accuracy requires linking a hardware clock.
+- `cfuture_pal_time_ms`: Times wait deadlines in polling mode only. Returns monotonic elapsed time in milliseconds when linked with a platform timer (e.g. `HAL_GetTick()`, `clock_gettime()`, or `GetTickCount64()`). When unlinked on ARM Cortex-M, advances an internal fallback counter per call to guarantee bounded timeout termination; real-time millisecond accuracy requires linking a hardware clock.
 - `cfuture_pal_cpu_relax`: Issues architecture-appropriate low-power yield. Emits Thumb-2 `yield` instruction on ARM Cortex-M, `sched_yield()` on POSIX, or `YieldProcessor()` on Win32.
 
 ---
@@ -611,14 +616,16 @@ void cfuture_pal_cpu_relax(void);
 
 Platform adapters implement `cfuture_sync_ops_t` (`include/cfuture_osal.h`):
 
-| Function Pointer | Expected Behavior | Execution Context | Optional? |
+| Function Pointer | Expected Behavior | Called From | Needed? |
 | :--- | :--- | :--- | :--- |
-| `void *(*event_create)(void)` | Allocates/initializes OS binary event/semaphore | Task context only | Required |
-| `void (*event_destroy)(void *event_handle)` | Frees OS event primitive | Task context only | Required |
-| `void (*event_set)(void *event_handle)` | Signals event to wake waiting task | Task context | Required |
-| `bool (*event_wait)(void *event_handle, uint32_t timeout_ms)` | Blocks caller until signaled or timeout. Returns `true` on signal. Only a wakeup hint: the core re-checks slot state and the PAL clock, so early or spurious returns are harmless | Task context only | Required |
-| `void (*event_reset)(void *event_handle)` | Clears event flag before slot reuse, and clears a stale signal seen during a wait (needed for latching / manual-reset events) | Task context | Optional (can be `NULL`) |
-| `void (*event_set_from_isr)(void *event_handle)` | Signals event using kernel ISR-safe API | **Interrupt Context** | Optional (falls back to `event_set` if `NULL`) |
+| `void *(*event_create)(void)` | Allocates/initializes one event per slot | `cfuture_pool_init()` | Needed for event mode. If `NULL`, slots get no event and the pool silently runs in polling mode |
+| `void (*event_destroy)(void *event_handle)` | Frees the event | `cfuture_pool_destroy()`, and init rollback | Optional |
+| `void (*event_set)(void *event_handle)` | Signals the event to wake the waiter | Producer task; also **interrupt context** when `event_set_from_isr` is `NULL` | Needed whenever `event_wait` is set, otherwise task-context resolutions never wake the waiter before its timeout |
+| `bool (*event_wait)(void *event_handle, uint32_t timeout_ms)` | Blocks until signaled or timeout (`UINT32_MAX` = forever). Returns `true` on signal. Must return `false` only once `timeout_ms` has elapsed (absorb spurious wakeups inside the adapter): in event mode that return *is* the library's timeout | Waiting task | Needed for event mode. If `NULL`, `cfuture_wait_for()` polls |
+| `void (*event_reset)(void *event_handle)` | Clears the event | `cfuture_create()` (any creator task) and the waiting task (stale signal) | Optional; provide it for manual-reset events |
+| `void (*event_set_from_isr)(void *event_handle)` | Signals the event using an ISR-safe kernel API | **Interrupt context** | Optional (falls back to `event_set`) |
+
+**The event must latch**: a set that arrives before the wait starts must make that wait return (binary-semaphore semantics), because the producer can resolve between the waiter's state check and its `event_wait` call. Auto-reset and manual-reset events both qualify; manual-reset events additionally need `event_reset`. With a primitive that does not latch, a `UINT32_MAX` wait can hang.
 
 ---
 
@@ -628,8 +635,8 @@ Platform adapters implement `cfuture_sync_ops_t` (`include/cfuture_osal.h`):
 // 1. Declare static memory buffers
 CFUTURE_DEFINE_STATIC_BUFFERS(pool_name, payload_type, capacity);
 
-// 2. Generate type-safe inline wrapper API
-CFUTURE_DEFINE_TYPED_POOL(subsystem_name, payload_type, pool_capacity);
+// 2. Generate type-safe inline wrapper API (no trailing semicolon: it ends in a function body)
+CFUTURE_DEFINE_TYPED_POOL(subsystem_name, payload_type, pool_capacity)
 ```
 
 Generates:
@@ -645,7 +652,7 @@ Generates:
 - `void subsystem_name##_promise_set_from_isr(subsystem_name##_promise_t *p, const payload_type *val, int32_t status_code)`
 - `void subsystem_name##_promise_drop_from_isr(subsystem_name##_promise_t *p, int32_t status_code)`
 
-The typed handles mirror `cfuture_t` / `cpromise_t`; a `CFUTURE_STATIC_ASSERT` inside the macro checks their size and field offsets at compile time.
+Neither macro creates or initialises the `cfuture_pool_t`; the caller still calls `cfuture_pool_init()`. The typed handles mirror `cfuture_t` / `cpromise_t`, and a `CFUTURE_STATIC_ASSERT` checks their size and field offsets, and that `pool_capacity` is 1..32, at compile time. At run time the wrappers only accept a pool whose `payload_size` equals `sizeof(payload_type)`: `_create()` returns `false` and `_future_wait()` reports `CFUTURE_ERR_INVALID` (leaving the handle untouched) for any other pool.
 
 ---
 
@@ -679,6 +686,13 @@ typedef struct
 // Statically allocate pool memory: 0 bytes dynamic allocation
 CFUTURE_DEFINE_STATIC_BUFFERS(s_storage, storage_response_t, STORAGE_QUEUE_CAPACITY);
 static cfuture_pool_t s_storage_pool;
+
+// Call once, before any task uses the pool
+bool storage_pool_setup(void)
+{
+    return cfuture_pool_init(&s_storage_pool, STORAGE_QUEUE_CAPACITY, sizeof(storage_response_t),
+                             s_storage_slots, s_storage_payload, cfuture_posix_sync_ops());
+}
 
 // --- Shared Storage Servicer Task (T_S) ---
 void storage_servicer_task_loop(void *queue_handle)
@@ -746,10 +760,10 @@ bool save_audio_sample_safe(uint32_t sector, const uint8_t *data, uint32_t timeo
         return (status_code == CFUTURE_OK);
     }
 
-    // TIMEOUT OR CANCELLATION:
-    // T_A safely returns and unwinds its call stack immediately!
-    // The slot remains locked (producer hold) until T_S dequeues the promise.
-    // ZERO dangling stack pointers, ZERO Queue ABA collisions.
+    // TIMEOUT (status_code == CFUTURE_ERR_TIMEOUT) OR WORKER DROP (the worker's code):
+    // T_A returns and unwinds its call stack at once.
+    // After a timeout the slot stays allocated (producer hold) until T_S resolves the
+    // promise, so T_S cannot write into a reused slot. After a drop it is already free.
     return false;
 }
 ```
@@ -782,16 +796,14 @@ void DMA2_Stream0_IRQHandler(void)
 
 ### Target Platform Comparison
 
-| Platform / RTOS | Adapter Header | Sync Primitive | ISR Reentrant? | Memory Allocation | Typical Latency |
+| Platform / RTOS | Adapter Header | Sync Primitive | Signal from ISR? | Memory | Tested in this repo? |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Linux / macOS (POSIX)** | `adapters/cfuture_posix.h` | `pthread_mutex` + `pthread_cond` (`CLOCK_MONOTONIC`) | No | Zero-Heap Static | ~70 ns |
-| **Windows (Win32)** | `adapters/cfuture_win32.h` | Win32 Manual-Reset Event | No | Zero-Heap Static | not re-measured |
-| **Bare-Metal / Polling** | `adapters/cfuture_polling.h` | Polls slot state with `cfuture_pal_cpu_relax()` | **Yes** | Zero-Heap Static | ~59 ns |
-| **FreeRTOS / CMSIS-OS2** | Hardware Showcase Repo | `EventGroup` / `osEventFlags` | **Yes** (`_FromISR`) | Zero-Heap Static | ~1.2 $\mu$s |
-| **Azure RTOS ThreadX** | Hardware Showcase Repo | `TX_EVENT_FLAGS_GROUP` | **Yes** (`tx_event_flags_set`) | Zero-Heap Static | ~0.9 $\mu$s |
-| **Zephyr RTOS** | Hardware Showcase Repo | `struct k_event` | **Yes** (ISRs supported) | Zero-Heap Static | ~1.1 $\mu$s |
+| **Linux / macOS (POSIX)** | `adapters/cfuture_posix.h` | `pthread_mutex` + `pthread_cond` (`CLOCK_MONOTONIC`; `CLOCK_REALTIME` on macOS) | No real ISR context on a host | Static table of 128 events | Yes, on Linux (unit, stress, TSan, ASan/UBSan). macOS not run |
+| **Windows (Win32)** | `adapters/cfuture_win32.h` | Win32 manual-reset event (`CreateEventA`) | No real ISR context on a host | Static table of 64 handles; the kernel objects themselves are allocated by Windows | **No.** Not built or run here. MSVC needs C11 atomics (`/experimental:c11atomics`), which the CMake build does not pass |
+| **Bare-Metal / Polling** | `adapters/cfuture_polling.h` (or `NULL`) | None: polls slot state with `cfuture_pal_cpu_relax()` | Yes (nothing to signal) | None | Yes, on Linux |
+| **FreeRTOS / ThreadX / Zephyr** | Not in this repo: `targets/<os>/osal/` in the companion [STM32F407VGT6](https://github.com/Mrunmoy/STM32F407VGT6) repo | e.g. FreeRTOS static binary semaphores | Depends on the adapter's `event_set_from_isr` | Static tables in the adapter | **No.** Nothing in this repo builds or tests them, and that repo vendors its own copy of this library |
 
-Host latencies are the full create → fulfil → wait roundtrip measured with `bench_throughput` on an Intel Core i7-8700K (Clang 21, `-O3`). The Win32 and RTOS figures come from their own targets and predate the generation-tagged ownership model; they have not been re-measured.
+Uncontended single-thread call overhead on an Intel Core i7-8700K (Clang 21, `-O3`), from `bench_throughput`: about 72-75 ns per create → fulfil → wait cycle with the POSIX backend and about 58 ns in polling mode. Nothing blocks in that benchmark, so these are API call costs, not wake-up latencies; no RTOS or Win32 figures have been measured.
 
 ---
 
@@ -820,12 +832,13 @@ cfuture_pool_init(&pool, CAPACITY, sizeof(packet_t),
                   slots_memory, arena_memory,
                   cfuture_win32_sync_ops());
 ```
+On non-Windows builds `cfuture_win32_sync_ops()` returns `NULL`, which `cfuture_pool_init()` treats as polling mode. The adapter's lazy table initialisation is not thread-safe: initialise the first pool from one thread.
 
 ---
 
 ### Atomic Polling Adapter (Bare-Metal / No-OS)
 
-Zero-dependency adapter with no OS events at all (equivalent to passing `NULL`): `cfuture_wait_for()` polls the slot state, yields through `cfuture_pal_cpu_relax()` and times the deadline with `cfuture_pal_time_ms()`. Perfect for single-core or multi-core SMP microcontrollers without an RTOS kernel:
+Zero-dependency adapter with no OS events at all (equivalent to passing `NULL`): `cfuture_wait_for()` polls the slot state, yields through `cfuture_pal_cpu_relax()` and times the deadline with `cfuture_pal_time_ms()`. It is a busy-wait: `cfuture_wait_for()` never blocks. Use it when the producer is an ISR, another core, or a higher-priority task. Under a priority-preemptive RTOS a *lower*-priority worker never gets to run while a higher-priority task polls, so every wait runs to its timeout (and a `UINT32_MAX` wait deadlocks) unless `cfuture_pal_cpu_relax()` is overridden with the RTOS yield/delay call, or an event backend is injected:
 ```c
 #include "cfuture.h"
 #include "adapters/cfuture_polling.h"
@@ -839,41 +852,32 @@ cfuture_pool_init(&pool, CAPACITY, sizeof(packet_t),
 
 ### RTOS Targets (FreeRTOS, ThreadX, Zephyr)
 
-So that everything in `janus` is exercised by tests that actually run, untested RTOS mock headers were removed in favor of real-hardware verification. Complete, silicon-validated RTOS adapters running on STM32F407 hardware are maintained in the companion [STM32F407 Multi-RTOS Showcase](https://github.com/Mrunmoy/STM32F407VGT6).
+This repository ships no RTOS adapter and runs no RTOS or hardware test. FreeRTOS, ThreadX and Zephyr `cfuture_sync_ops_t` implementations live in the companion [STM32F407VGT6](https://github.com/Mrunmoy/STM32F407VGT6) repository (`targets/<os>/osal/`), which vendors a copy of this library under `external/cfuture`; after a change here, that copy has to be updated and re-verified there. An RTOS port must meet the OSAL contract above (in particular the latching requirement) and provide a real tick for `cfuture_pal_time_ms()`. `STM32F407_MULTI_OS_PLAN.md` is the original plan for that repository, not a record of what it verified.
 
 ---
 
 ## 9. Microcontroller Porting & Silicon Guidelines
 
-### ARM Cortex-M Memory Placement & D-Cache Coherency
+### Data Cache and DMA (Cortex-M7 / M55 / M85)
 
-On high-performance Cortex-M7/M33 cores equipped with L1 data cache (e.g., STM32H7, i.MX RT):
-1. **Non-Cacheable RAM Placement**: Place pool slots and payload arenas in non-cacheable SRAM or Tightly-Coupled Memory (DTCM) using linker attributes:
-   ```c
-   __attribute__((section(".dtcmram"))) static cfuture_slot_t s_slots[8];
-   __attribute__((section(".dtcmram"))) static uint8_t s_payload_arena[8 * sizeof(packet_t)];
-   ```
-2. **Explicit Cache Invalidation**: If allocated in cacheable memory, ensure the consumer invalidates its data cache before reading the payload:
-   ```c
-   SCB_InvalidateDCache_by_Addr((uint32_t *)payload_buffer, sizeof(packet_t));
-   ```
+The library moves payloads with CPU `memcpy` only, which is coherent through the data cache on a single core, so it needs no cache maintenance of its own. Cache handling only matters if something other than the CPU (a DMA master, or a second heterogeneous core) writes the payload arena or the buffer you pass to `cpromise_set_value()`. In that case either place those buffers in non-cacheable memory:
+```c
+__attribute__((section(".dtcmram"))) static cfuture_slot_t s_slots[8];
+__attribute__((section(".dtcmram"))) static uint8_t s_payload_arena[8 * sizeof(packet_t)];
+```
+or follow your vendor's DMA cache rules for the DMA buffer. Do not invalidate the cache over the payload arena before reading it: that can discard a CPU write that has not reached RAM yet.
 
 ---
 
-### Cortex-M0/M0+ Bitmask Emulation
+### Cortex-M0/M0+ Atomics
 
-Cortex-M0 and M0+ cores lack hardware LDREX/STREX and 64-bit atomic instructions:
-- `libcfuture` keeps all of its atomics (allocation bitmask, per-slot `owner` word and state) in `uint_fast32_t`, which compiles directly to native 32-bit instructions.
-- On single-core Cortex-M0+, critical CAS loops can safely be wrapped in standard PRIMASK interrupt disables (`__disable_irq()` / `__enable_irq()`).
+ARMv6-M (Cortex-M0/M0+) has no LDREX/STREX, so the compiler cannot inline the library's atomics. Compiling `src/cfuture.c` for `-mcpu=cortex-m0plus` leaves calls to `__atomic_compare_exchange_4`, `__atomic_fetch_and_4` and `__atomic_fetch_add_4` (and libgcc's `__ctzsi2`) for the integrator to provide; the library does not link on M0/M0+ without them. On a single-core part they can be implemented with a PRIMASK critical section; on a dual-core part such as the RP2040 they need a hardware spinlock (e.g. pico-sdk's `pico_atomic`), because masking interrupts on one core does not exclude the other. Cortex-M3/M4/M7/M33 builds need none of this. No M0 configuration is built or tested in this repository.
 
 ---
 
-### Multi-Core SMP Memory Barriers
+### Multi-Core Payload Publication
 
-When running on multi-core microcontrollers (e.g., Raspberry Pi RP2040 dual Cortex-M0+, ESP32 dual-core Xtensa/RISC-V):
-- Payload copies in `cpromise_set_value()` are guarded by `memory_order_release`.
-- Payload reads in `cfuture_wait_for()` are guarded by `memory_order_acquire`.
-- This enforces strict hardware memory bus synchronization across processor cores without manual memory barrier assembly (`DMB`/`DSB`).
+`cpromise_set_value()` writes the payload and status with plain stores and then publishes them with the `PENDING -> COMPLETED` state CAS (`memory_order_release`); `cfuture_wait_for()` reads them only after loading that state (`memory_order_acquire`). That pairing is what makes the payload visible to a consumer on another core without hand-written barriers. It relies on the toolchain's C11 atomics being correct for the target (see the Cortex-M0 note for RP2040). Only x86-64 SMP is exercised by this repository's tests.
 
 ---
 
@@ -881,10 +885,10 @@ When running on multi-core microcontrollers (e.g., Raspberry Pi RP2040 dual Cort
 
 ### Static Memory Footprint
 
-Measured on release library build inside the Nix dev shell (`clang 21.1.8 -O3 -DNDEBUG`, x86_64):
+Host object sizes, release build inside the Nix dev shell (`clang 21.1.8 -O3 -DNDEBUG`, x86-64). This table is what `build.py --docs` checks; x86-64 is not a ROM target, so treat it as a regression reference only:
 
 ```text
---- Binary Footprint (size libcfuture.a) ---
+--- Binary Footprint (size) ---
    text    data     bss     dec     hex filename
    4160       0       8    4168    1048 cfuture.c.o
     218       0       0     218      da cfuture_pal.c.o
@@ -892,20 +896,26 @@ Measured on release library build inside the Nix dev shell (`clang 21.1.8 -O3 -D
    1142      48   12337   13527    34d7 cfuture_posix.c.o
 ```
 
-- **Core ROM Footprint**: **4,160 bytes** (4,378 bytes including PAL, < 5 KB).
-- **Mutable Global RAM (`.data` / `.bss`)**: **one `uint_fast32_t`** in the core (8 bytes on this 64-bit host, 4 bytes on Cortex-M): the pool-init epoch counter that gives every pool life a different starting generation. All pool, slot and payload storage is caller-provided. The POSIX adapter's static event table is host-only.
-- **Dynamic Heap Memory (`malloc`/`free`)**: **0 bytes** (Audited via `nm`).
+Cross-compiled objects (`arm-none-eabi-gcc 15.3 -std=c11 -Os -mthumb`; compiled only, not linked or run on hardware):
+
+| Target | `cfuture.c` text | `cfuture_pal.c` text | `.bss` |
+| :--- | :--- | :--- | :--- |
+| Cortex-M4 | 1,660 bytes | 44 bytes | 4 + 4 bytes |
+| Cortex-M0+ | 1,640 bytes | 40 bytes | 4 + 4 bytes (plus the `__atomic_*` helpers the integrator must supply) |
+
+- **Library static RAM**: two `uint_fast32_t` words on Cortex-M: the pool-init epoch counter in the core, and the PAL's fallback tick (unused once `HAL_GetTick()` is linked; gone if `cfuture_pal_time_ms()` is overridden). On the x86-64 host it is one 8-byte word. All pool, slot and payload storage is caller-provided. The POSIX adapter's static event table (about 12 KB) is host-only.
+- **Dynamic Heap Memory (`malloc`/`free`)**: none; `build.py --stats` fails if `nm` finds an allocation symbol in `libcfuture.a`.
 
 ---
 
 ### Latency & Throughput Benchmarks
 
-Executed on an Intel Core i7-8700K host (Clang 21, `-O3`) over 100,000 continuous cycles:
+`bench_throughput`, Intel Core i7-8700K, Clang 21 `-O3`, 100,000 iterations per line. Single-threaded and uncontended: the value is always there before the wait, so nothing blocks. These are API call costs, not wake-up latencies:
 
-| Operation | Latency (ns/op) | Throughput (ops/sec) |
+| Cycle | POSIX event backend | Polling mode |
 | :--- | :--- | :--- |
-| **Slot Claim + Immediate Drop** | **~58 ns** | **~17,000,000 ops/sec** |
-| **Complete Roundtrip Cycle** (Create $\to$ Fulfill $\to$ Wait $\to$ Drop) | **~70 ns** | **~14,000,000 ops/sec** |
+| Create → Abandon → Drop | ~59 ns (~17 M/s) | ~52 ns (~19 M/s) |
+| Create → Fulfill → Wait | ~72-75 ns (~13-14 M/s) | ~58 ns (~17 M/s) |
 
 Each side pays one extra CAS per transaction for its generation-checked claim; that is the cost of stale and duplicated handles being harmless.
 
@@ -915,41 +925,46 @@ Each side pays one extra CAS per transaction for its generation-checked claim; t
 
 ### GoogleTest Test Suite Matrix
 
-The test harness comprises 10 dedicated suites. Everything except the time-boxed chaos run finishes in under a second; `test_stress_chaos` runs 1.5 s for each of its three sync modes by default (set `CFUTURE_STRESS_MS` for longer soaks):
+The test harness comprises 11 suites, all run on a Linux x86-64 host. Everything except the time-boxed chaos run finishes in about a second; `test_stress_chaos` runs 1.5 s for each of its three sync modes by default (set `CFUTURE_STRESS_MS` for longer soaks):
 
-| Test Suite | Binary Target | Coverage Focus |
+| Test Suite | Binary Target | What it actually tests |
 | :--- | :--- | :--- |
-| **`test_pool_init`** | `build/tests/test_pool_init` | Capacity validation, parameter boundary checking, static arena alignment. |
-| **`test_lifecycle`** | `build/tests/test_lifecycle` | Valid state transitions, payload fidelity, immediate drop cleanup, no payload carry-over between occupants. |
-| **`test_timeouts`** | `build/tests/test_timeouts` | Deadline expiration, timeout state pinning, consumer unwinding, spurious / failing OSAL waits. |
-| **`test_isr_safety`** | `build/tests/test_isr_safety` | Reentrant completion, zero-context fulfillment, ISR event flags. |
-| **`test_typed_pool`** | `build/tests/test_typed_pool` | Type-safe macro wrappers, multi-pool isolation, compiler strictness. |
-| **`test_concurrency_stress`** | `build/tests/test_concurrency_stress` | High-frequency multi-threaded race conditions (100k cycles), duplicate-producer race, stale-handle hammer. |
-| **`test_error_injection`** | `build/tests/test_error_injection` | Mock sync failure, OS event creation failure, CAS saturation rollback. |
+| **`test_pool_init`** | `build/tests/test_pool_init` | Argument validation of `cfuture_pool_init()` / `cfuture_create()`, slot initialisation, sequential allocation until full, polling-mode wait with no sync ops. |
+| **`test_lifecycle`** | `build/tests/test_lifecycle` | Create/fulfil/consume, drop, abandon, slot reuse, zero-size and struct payloads, NULL-payload completion not leaking the previous occupant's data, a full cycle through `cfuture_polling_sync_ops()`. |
+| **`test_timeouts`** | `build/tests/test_timeouts` | Zero timeout, timed-out waits, the OSAL wait contract (a false return is the timeout and is not retried; failed forever-waits are retried; the backend timeout is not multiplied), stale latched signals, the largest finite timeout. |
+| **`test_isr_safety`** | `build/tests/test_isr_safety` | The `_from_isr` entry points call the ISR sync hook and deliver / drop / recycle correctly, including an ISR-only backend with no `event_set`. Called from an ordinary thread through the mock: no real interrupt, pre-emption or re-entrancy is exercised. |
+| **`test_typed_pool`** | `build/tests/test_typed_pool` | Every generated wrapper of one typed pool, including ISR variants and cancel, and rejection of a pool with a different payload size. |
+| **`test_concurrency_stress`** | `build/tests/test_concurrency_stress` | 100k multi-threaded producer/consumer cycles, a duplicate-producer race, a stale-handle hammer. |
+| **`test_error_injection`** | `build/tests/test_error_injection` | Event-creation failure and rollback, NULL / out-of-range / invalidated handles, double wait / fulfil / abandon / drop, pool saturation and recovery, custom drop codes. |
 | **`test_generation`** | `build/tests/test_generation` | Stale, duplicated and forged handles, generation wrap, pool re-init, `cfuture_cancel()`. |
 | **`test_posix_adapter`** | `build/tests/test_posix_adapter` | POSIX event latch/reset/timeout semantics, lost-wakeup ping-pong. |
-| **`test_stress_chaos`** | `build/tests/test_stress_chaos` | Randomised multi-threaded scenarios (timeouts, abandons, drops, duplicates, cancels, stale replays) in event, polling and hostile-OSAL modes (waits that return early, fake signals, no `event_reset`). |
+| **`test_pal_fallback`** | `build/tests/test_pal_fallback` | Waits when the PAL clock only counts calls while the backend blocks for real: the timeout is not multiplied, values still arrive, stale signals are handled, polling still terminates. |
+| **`test_stress_chaos`** | `build/tests/test_stress_chaos` | Randomised multi-threaded scenarios (timeouts, abandons, drops, duplicates, cancels, stale replays) in event, polling and hostile-OSAL modes (frequent fake signals and no `event_reset`). |
+
+**Not tested anywhere in this repository**: the Win32 adapter and Win32 PAL branch (never compiled here), the Cortex-M PAL branch (compile-checked with `arm-none-eabi-gcc` only), any RTOS adapter, any real interrupt context, any hardware, macOS, and MSVC. There is no CI; the results below come from running `build.py` locally in the Nix shell.
 
 ---
 
 ### Sanitizer Verification (TSan, ASan, UBSan)
 
-- **ThreadSanitizer (TSan)**: Verified over 100,000 continuous multi-threaded producer-consumer cycles plus the randomised chaos run (all three sync modes) with **zero data races**.
-- **AddressSanitizer (ASan) & UndefinedBehaviorSanitizer (UBSan)**: 100% clean across all test suites with zero buffer overflows, zero dangling references, and zero undefined shifts.
+- **ThreadSanitizer**: `build.py --tsan` runs the whole suite (including the 100k-cycle stress test and all three chaos modes) and reports no data races.
+- **AddressSanitizer & UndefinedBehaviorSanitizer**: `build.py --asan` runs the whole suite with no reports.
+
+Both are Linux x86-64 host runs with Clang 21; they say nothing about other targets.
 
 ---
 
 ### Static Analysis & Code Style
 
-- **Clang-Format**: Enforces strict Allman style braces and 4-space indentation across all C and C++ sources (`.clang-format`).
-- **Cppcheck**: Static analysis clean with `--enable=all`.
-- **Compiler Flags**: Enforces `-Wall -Wextra -Werror -pedantic` everywhere, plus `-Wshadow -Wundef -Wstrict-prototypes -Wpointer-arith -Wcast-align` on the library target (GCC/Clang), and `/W4 /WX` on MSVC.
+- **Clang-Format**: Allman braces, 4-space indentation (`.clang-format`), checked by `build.py --lint` over `src/`, `include/`, `tests/`, `benchmarks/` and `examples/`.
+- **Cppcheck**: `--enable=all` over `src/` only, with `missingIncludeSystem`, `unusedFunction` and `normalCheckLevelMaxBranches` suppressed; no findings.
+- **Compiler Flags**: `-Wall -Wextra -Werror -pedantic` on the library, tests, benchmark and example, plus `-Wshadow -Wundef -Wstrict-prototypes -Wpointer-arith -Wcast-align` on the library (GCC/Clang). The coverage build adds `-Wno-error`. `/W4 /WX` is set for MSVC on the library target, but MSVC builds are untested.
 
 ---
 
 ## 12. Build Automation & Tooling (`build.py`)
 
-A cross-platform Python build driver (`build.py`) provides a single point of entry across Linux, macOS, and Windows:
+A Python build driver (`build.py`) wraps CMake/CTest. It is written to be portable, but it is only exercised on Linux inside the Nix shell:
 
 ```bash
 # Execute complete verification pipeline:
@@ -960,13 +975,14 @@ python3 build.py --all
 
 | Flag | Purpose |
 | :--- | :--- |
+| `python3 build.py --all` | Runs the whole pipeline: clean, build, test, tsan, asan, stats, lint, docs, bench. |
 | `python3 build.py --build` | Configures and builds Release library in `build/`. |
-| `python3 build.py --test` | Executes full 10-suite CTest verification suite. |
-| `python3 build.py --tsan` | Builds and runs 100k cycle ThreadSanitizer suite in `build_tsan/`. |
+| `python3 build.py --test` | Executes full 11-suite CTest verification suite. |
+| `python3 build.py --tsan` | Builds the suite with ThreadSanitizer in `build_tsan/` and runs it. |
 | `python3 build.py --asan` | Builds and runs ASan & UBSan suite in `build_asan/`. |
 | `python3 build.py --stats` | Measures ROM/RAM size and verifies zero dynamic memory symbols via `nm`. |
-| `python3 build.py --lint` | Runs `cppcheck` static analysis and `clang-format` style check. |
-| `python3 build.py --docs` | Fails if `README.md` drifts from the code: unknown identifiers, undocumented API or flags, missing test suites, wrong suite count, stale footprint table. Part of `--all`. |
+| `python3 build.py --lint` | Runs `cppcheck` over `src/` and the `clang-format` style check. |
+| `python3 build.py --docs` | Fails if `README.md` drifts from the code: unknown identifiers, undocumented API or flags, missing test suites, wrong suite count, stale host footprint table (needs GNU `size`; warns if it cannot compare), retired terms, `#` inside mermaid blocks. It cannot judge prose. Part of `--all`. |
 | `python3 build.py --bench` | Compiles and executes micro-benchmark suite. |
 | `python3 build.py --coverage` | Builds with coverage in `build_cov/`, runs the suite and prints the lcov line/function report (`build_cov/coverage.info`). |
 | `python3 build.py --clean` | Wipes all build artifacts and test output directories. |
@@ -975,7 +991,7 @@ python3 build.py --all
 
 ### Hermetic Nix Development Environment
 
-The project is meant to be built inside the reproducible environment defined by `flake.nix` (Clang, CMake, Ninja, GoogleTest, cppcheck, clang-format, lcov, valgrind). The footprint, coverage and benchmark figures in this document were measured there:
+The project is meant to be built inside the reproducible environment defined by `flake.nix` (Clang, CMake, GoogleTest, cppcheck, clang-format, lcov, valgrind; Ninja is available, though `build.py` uses CMake's default generator). The footprint, coverage and benchmark figures in this document were measured there:
 
 ```bash
 # Enter the hermetic shell:
@@ -994,6 +1010,8 @@ nix develop -c python3 build.py --all
 ├── CMakeLists.txt                # Root CMake build configuration
 ├── build.py                      # Unified cross-platform build & test driver
 ├── flake.nix                     # Hermetic Nix flake environment definition
+├── flake.lock                    # Pinned flake inputs
+├── .gitignore
 ├── .clang-format                 # Allman / 4-space style enforced by --lint
 ├── LICENSE                       # MIT license
 ├── include/
@@ -1012,6 +1030,7 @@ nix develop -c python3 build.py --all
 │       ├── cfuture_win32.c       # Win32 synchronization implementation
 │       └── cfuture_polling.c     # Polling synchronization implementation
 ├── tests/
+│   ├── CMakeLists.txt            # One GoogleTest binary per test_*.cpp
 │   ├── mock_sync_ops.hpp         # Mock synchronization provider for unit testing
 │   ├── test_pool_init.cpp        # Static pool initialization & capacity tests
 │   ├── test_lifecycle.cpp        # State transitions & payload transfer tests
@@ -1022,10 +1041,13 @@ nix develop -c python3 build.py --all
 │   ├── test_error_injection.cpp  # OS failure simulation & rollback tests
 │   ├── test_generation.cpp       # Stale/duplicate handle, generation wrap & cancel tests
 │   ├── test_posix_adapter.cpp    # Direct POSIX adapter semantics tests
+│   ├── test_pal_fallback.cpp     # Waits when the PAL clock is not a real ms clock
 │   └── test_stress_chaos.cpp     # Randomised multi-threaded chaos test
 ├── benchmarks/
-│   └── bench_throughput.cpp      # Latency & throughput micro-benchmarking
+│   ├── CMakeLists.txt
+│   └── bench_throughput.cpp      # Call-overhead micro-benchmark (POSIX and polling modes)
 ├── examples/
+│   ├── CMakeLists.txt
 │   └── sensor_pipeline.c         # End-to-end multi-task sensor showcase
 ├── STM32F407_MULTI_OS_PLAN.md    # Master architecture plan for companion hardware repo
 └── README.md                     # Technical architecture documentation

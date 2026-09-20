@@ -9,21 +9,22 @@
  *
  * Key guarantees:
  * - Zero dynamic memory allocation (0 bytes malloc/free).
- * - Compile-time static bounds: CFUTURE_MAX_CAPACITY slots enforced via bitmask.
+ * - Fixed capacity of at most CFUTURE_MAX_CAPACITY slots per pool (one bitmask word),
+ *   checked at run time by cfuture_pool_init() and at compile time by the helper macros.
  * - Lock-free, non-blocking single-slot acquisition via atomic CAS on bitmask.
  * - Dual-owner hold bits (consumer + producer) preventing premature slot recycling
  *   while the producer is signaling the consumer event. Each side can only ever
  *   release its own hold, so a duplicated handle cannot steal the other side's.
  * - Generation-tagged handles: a handle that outlives its slot's recycling is
  *   rejected instead of aliasing the slot's next occupant.
- * - Immediate non-blocking timeout unwinding: consumer marks TIMEOUT and exits
- *   instantly without spinning or blocking; deferred slot recycling is safely
- *   handled by the producer upon completion.
+ * - Timeout unwinding without waiting for the producer: the consumer marks TIMEOUT and
+ *   returns; the slot is recycled later, when the producer resolves its promise.
  * - Asynchronous ISR safety: promises can be fulfilled directly from hardware
  *   interrupt service routines via dedicated cpromise_*_from_isr() APIs.
  * - Platform Abstraction Layer (PAL) for monotonic time and CPU relax hints.
  * - Operating System Abstraction Layer (OSAL) for pluggable RTOS/Host synchronization.
- * - Strict C11 / C++17 compatibility.
+ * - Header usable from C11 and C++17. The implementation is C11 plus a few compiler
+ *   builtins (count-trailing-zeros, weak symbols, one inline YIELD).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -93,7 +94,14 @@ extern "C"
 #define CFUTURE_FALLBACK_EINVAL 22
 #define CFUTURE_FALLBACK_ENOSPC 28
 
-/** Status and error codes matching standard UNIX/POSIX errno conventions. */
+/** Status and error codes matching standard UNIX/POSIX errno conventions. The numeric values
+ *  come from the target's <errno.h> and differ between C libraries (glibc vs newlib), so
+ *  never exchange raw codes between a host and a target.
+ *
+ *  cfuture_wait_for() itself only reports the worker's status code, CFUTURE_ERR_TIMEOUT or
+ *  CFUTURE_ERR_INVALID. CFUTURE_ERR_DROPPED, CFUTURE_ERR_ABANDONED, CFUTURE_ERR_PARAM and
+ *  CFUTURE_ERR_FULL are provided for application use (e.g. as a cpromise_drop() reason);
+ *  no library function returns them. */
 #define CFUTURE_OK ((int32_t)0)
 
 #if defined(ETIMEDOUT)
@@ -213,10 +221,14 @@ extern "C"
      * @param[in]  payload_buf  Caller-provided byte buffer of size capacity * payload_size (can be
      * NULL if payload_size == 0).
      * @param[in]  sync_ops     Pointer to OSAL interface table, or NULL for PAL polling mode.
-     * @return true on success, false if parameters are invalid.
+     * @return true on success, false if parameters are invalid or an event could not be
+     *         created (the bundled adapters have process-wide event tables: 128 on POSIX,
+     *         64 on Win32).
      *
-     * @note Every init starts the pool's slots from a different generation, so handles
-     *       left over from before a destroy + re-init of the same buffers are rejected.
+     * @note Every init starts the pool's slots from a different point of the generation
+     *       space, so a handle left over from before a destroy + re-init of the same buffers
+     *       does not match until that slot has been recycled enough times to reach its old
+     *       generation. This is spacing, not a guarantee.
      *       Not thread-safe against use of the same pool; call before any create.
      */
     bool cfuture_pool_init(cfuture_pool_t *pool, uint32_t capacity, size_t payload_size,
@@ -239,7 +251,8 @@ extern "C"
      * @param[in,out] pool        The future pool instance.
      * @param[out]    out_promise Receives the producer handle.
      * @param[out]    out_future  Receives the consumer handle.
-     * @return true if slot was successfully allocated, false if pool is full or params invalid.
+     * @return true if slot was successfully allocated; false if params are invalid, the pool
+     *         is full, or the bounded CAS retry budget was exhausted under contention.
      *
      * @note Both handles are stamped with the slot's current generation. They may be copied
      *       (e.g. into a queue message), but only the first use of each side takes effect.
@@ -250,17 +263,19 @@ extern "C"
      * @brief Waits for the worker to fulfill the promise within a timeout.
      *
      * @param[in,out] future      The future handle. Invalidated upon return.
-     * @param[in]     timeout_ms  Timeout in milliseconds (0 = non-blocking, UINT32_MAX = forever).
+     * @param[in]     timeout_ms  Timeout in milliseconds. UINT32_MAX = forever. 0 = do not wait:
+     *                            an unresolved future is timed out and consumed, and a later
+     *                            result is discarded (there is no repeatable poll).
      * @param[out]    out_payload Buffer to copy result payload into (optional, can be NULL).
      * @param[out]    out_status  Receives status code (0 = success) or error code (optional, can be
      * NULL).
      * @return true if completed successfully, false if timed out, dropped, or invalid.
      *
      * @note A stale, duplicated or already-consumed handle yields CFUTURE_ERR_INVALID.
-     *       A finite timeout never fires early (it may overshoot by one PAL clock tick).
-     *       The wait is timed with cfuture_pal_time_ms() even when an OSAL event backend
-     *       is injected, so that clock must be real: on Cortex-M link HAL_GetTick() or
-     *       override cfuture_pal_time_ms().
+     *       With an OSAL event backend the backend's own timed wait is the time base, so
+     *       the timeout is as accurate as that backend. In polling mode the wait busy-loops
+     *       on cfuture_pal_cpu_relax() and is timed by cfuture_pal_time_ms(): it never
+     *       fires early and overshoots by at least one clock tick.
      */
     bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
                           int32_t *out_status);
@@ -279,8 +294,10 @@ extern "C"
      *
      * Intended for the requester when handing the promise to the worker failed
      * (e.g. queue full). Succeeds only while both sides still hold the slot and
-     * neither has started waiting or resolving; this does not cancel a worker
-     * that already owns the promise.
+     * neither has started waiting or resolving. It is not cancellation of running work:
+     * it still succeeds while a worker holds a copy of the promise and is mid-work, up to
+     * the moment that worker calls set_value/drop; the worker's copy is then stale and its
+     * eventual resolution is a no-op.
      *
      * @param[in,out] promise The promise handle. Invalidated on success only.
      * @param[in,out] future  The future handle of the same pair. Invalidated on success only.
@@ -290,7 +307,8 @@ extern "C"
     bool cfuture_cancel(cpromise_t *promise, cfuture_t *future);
 
     /**
-     * @brief Checks if the consumer is still actively waiting for the promise.
+     * @brief Checks if the consumer still wants the result (it has not timed out or
+     *        abandoned; it need not have started waiting yet).
      *
      * @param[in] promise The promise handle.
      * @return true if caller is still waiting, false if caller timed out or abandoned, if a
@@ -300,6 +318,10 @@ extern "C"
 
     /**
      * @brief Fulfills the promise with a result value and notifies the consumer.
+     *
+     * Every promise must be resolved exactly once (set_value or drop), or its pair
+     * cancelled: after a consumer timeout the producer hold keeps the slot allocated until
+     * the producer resolves, and nothing else reclaims it short of pool destroy + re-init.
      *
      * @param[in,out] promise    The promise handle. Invalidated upon return.
      * @param[in]     payload    Result data to copy into pool slot. NULL delivers a zero-filled
@@ -338,6 +360,8 @@ extern "C"
  * @brief Helper macro to allocate static storage buffers for a pool.
  */
 #define CFUTURE_DEFINE_STATIC_BUFFERS(pool_name, payload_type, capacity)                           \
+    CFUTURE_STATIC_ASSERT((capacity) >= 1U && (capacity) <= 32U,                                   \
+                          "pool capacity must be 1..CFUTURE_MAX_CAPACITY");                        \
     static cfuture_slot_t pool_name##_slots[(capacity)];                                           \
     static uint8_t pool_name##_payload[(capacity) * sizeof(payload_type)]
 
@@ -345,7 +369,17 @@ extern "C"
  * @brief Macro generating type-safe wrapper functions for a subsystem future/promise.
  *
  * The generated handle types mirror cfuture_t / cpromise_t field for field; the layout is
- * checked at compile time so the wrappers' pointer casts stay valid.
+ * checked at compile time so the wrappers' pointer casts stay valid. The casts cross into
+ * the separately compiled library, which keeps them safe in practice; they are not strictly
+ * conforming under C aliasing rules, so do not build the library and its callers as one
+ * LTO unit without -fno-strict-aliasing.
+ *
+ * The wrappers only accept a pool whose payload_size equals sizeof(payload_type):
+ * _create() returns false and _future_wait() reports CFUTURE_ERR_INVALID (leaving the
+ * handle untouched) for any other pool. pool_capacity is checked to be 1..32 at compile
+ * time; the pool itself is still created by the caller with cfuture_pool_init().
+ *
+ * Invoke without a trailing semicolon: the expansion ends in a function body.
  */
 #define CFUTURE_DEFINE_TYPED_POOL(subsystem_name, payload_type, pool_capacity)                     \
     typedef struct                                                                                 \
@@ -370,15 +404,29 @@ extern "C"
             offsetof(subsystem_name##_promise_t, pool) == offsetof(cpromise_t, pool) &&            \
             offsetof(subsystem_name##_promise_t, generation) == offsetof(cpromise_t, generation),  \
         "typed promise handle must mirror cpromise_t");                                            \
+    CFUTURE_STATIC_ASSERT((pool_capacity) >= 1U && (pool_capacity) <= 32U,                         \
+                          "pool capacity must be 1..CFUTURE_MAX_CAPACITY");                        \
     static inline bool subsystem_name##_create(                                                    \
         cfuture_pool_t *pool, subsystem_name##_promise_t *p, subsystem_name##_future_t *f)         \
     {                                                                                              \
+        if (!pool || pool->payload_size != sizeof(payload_type))                                   \
+        {                                                                                          \
+            return false;                                                                          \
+        }                                                                                          \
         return cfuture_create(pool, (cpromise_t *)p, (cfuture_t *)f);                              \
     }                                                                                              \
     static inline bool subsystem_name##_future_wait(subsystem_name##_future_t *f,                  \
                                                     uint32_t timeout_ms, payload_type *out_val,    \
                                                     int32_t *out_status)                           \
     {                                                                                              \
+        if (f && f->pool && f->pool->payload_size != sizeof(payload_type))                         \
+        {                                                                                          \
+            if (out_status)                                                                        \
+            {                                                                                      \
+                *out_status = CFUTURE_ERR_INVALID;                                                 \
+            }                                                                                      \
+            return false;                                                                          \
+        }                                                                                          \
         return cfuture_wait_for((cfuture_t *)f, timeout_ms, (void *)out_val, out_status);          \
     }                                                                                              \
     static inline void subsystem_name##_future_abandon(subsystem_name##_future_t *f)               \

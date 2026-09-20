@@ -2,8 +2,8 @@
  * @file test_error_injection.cpp
  * @brief Error Case, Fault Injection, and Safe Recovery Unit Tests
  *
- * Verifies system behavior under OS resource exhaustion, handle corruption,
- * double operations, saturation recovery, and worker crashes.
+ * Verifies behavior under event-creation failure, NULL / out-of-range / invalidated
+ * handles, double operations, pool saturation and recovery, and worker drops.
  *
  * SPDX-License-Identifier: MIT
  */

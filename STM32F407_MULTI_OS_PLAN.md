@@ -1,5 +1,7 @@
 # Master Implementation Plan: Unified Multi-RTOS STM32F407 USB Storage Showcase
 
+> **Status note**: this is the original plan for the companion repository, <https://github.com/Mrunmoy/STM32F407VGT6>, which now exists and vendors `janus` under `external/cfuture`. The board is an FK407M2-ZGT6 (STM32F407ZGT6, 144-pin LQFP), as this plan says; the repository name and its CubeMX project and linker scripts use the STM32F407VGT6 part number, which has the same 1 MB flash and 192 KB SRAM in a 100-pin package. The plan is kept for reference and records intent, not verified results.
+
 > **Target Audience**: Autonomous Embedded Firmware Developer / Engineer  
 > **Repository Type**: Single-Branch Unified Multi-Target Hardware Showcase Repository  
 > **Core Dependency**: `janus` (`libcfuture`) as a Git submodule at `external/cfuture`  
@@ -16,7 +18,7 @@ Instead of managing multiple git branches, this repository uses a **unified sing
 ```
 stm32f407/
 ├── CMakeLists.txt              # Root build orchestrator (selects OSAL/PAL via -DTARGET_OS=...)
-├── build.py                    # Unified CLI script (--target {host,freertos,threadx,zephyr}, --build, --flash, --stats, --clean)
+├── build.py                    # Unified CLI script (--os {host,freertos,threadx,zephyr}, --build, --flash, --stats, --clean)
 ├── README.md                   # Hardware setup, wiring, flashing, and quickstart guide
 ├── external/
 │   └── cfuture/                # Git submodule / vendored libcfuture C11 core library
@@ -134,7 +136,7 @@ def main():
   - `cfuture_sync_ops_t` getter for the active OS.
   - Generic message queue: `osal_queue_create`, `osal_queue_send`, `osal_queue_receive`.
   - Generic task creation: `osal_task_create`, `osal_delay_ms`, `osal_get_time_ms`.
-  - A real millisecond tick behind `cfuture_pal_time_ms()` on every target (link `HAL_GetTick()` or override the weak symbol). `janus` times every `cfuture_wait_for()` deadline with it, including waits on an injected OSAL event; the `event_wait` result is only a wakeup hint. Each `cfuture_sync_ops_t` should also provide `event_reset`.
+  - Each `cfuture_sync_ops_t` must latch a set that arrives before the wait, should provide `event_reset`, and its `event_wait` must return `false` only once the timeout has elapsed: in event mode that backend timeout is `janus`'s only time base. `cfuture_pal_time_ms()` matters only for pools run in polling mode.
 - **Task 1.3**: Create `app/include/pal/` defining unified PAL interfaces (`PalLed`, `PalTimeSource`, `PalLogSink`, `PalStorage`) and block storage initialization, read, write, and FatFS disk status hooks.
 - **Task 1.4**: Integrate ChaN's FatFS under `third_party/fatfs/` (`ff.c`, `ff.h`, `diskio.h`, `ffconf.h`).
 - **Task 1.5**: Implement common application files:
@@ -153,7 +155,7 @@ def main():
 ### Phase 3: FreeRTOS + STM32 USB Host Target (`freertos`)
 - **Task 3.1**: Add FreeRTOS kernel under `third_party/freertos/` and STM32 HAL under `third_party/stm32f4_hal/`.
 - **Task 3.2**: Implement `app/src/osal/osal_freertos.c`:
-  - `cfuture_sync_ops_t` backed by FreeRTOS `EventGroupHandle_t` (`xEventGroupCreate`, `xEventGroupSetBits`, `xEventGroupWaitBits`).
+  - `cfuture_sync_ops_t` backed by FreeRTOS `EventGroupHandle_t` (`xEventGroupCreate`, `xEventGroupSetBits`, `xEventGroupWaitBits`), with `event_set_from_isr` mapped to `xEventGroupSetBitsFromISR` so promises can be fulfilled from interrupt context.
   - Queue backed by FreeRTOS `QueueHandle_t`.
 - **Task 3.3**: Implement `app/src/pal/pal_stm32f4_usb.c`:
   - Configure STM32 USB OTG FS Host stack (`usbh_core.c`, `usbh_msc.c`).

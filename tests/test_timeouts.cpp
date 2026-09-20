@@ -130,12 +130,13 @@ TEST_F(TimeoutsTest, ZeroTimeout_ReturnsSuccessIfAlreadyCompleted)
     EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
 }
 
-// ── Early / spurious event_wait returns ─────────────────────────────────────
-// An OSAL wait may return before the deadline without a signal (spurious condvar
-// wakeups, RTOS wait errors, adapters that cap long waits). Only the slot state and
-// the PAL clock may decide that a wait is over.
+// ── OSAL wait contract ──────────────────────────────────────────────────────
+// In event mode the backend's own timeout is the time base: a false return from a finite
+// wait means "the timeout elapsed" (on-target testing showed that timing the wait with
+// the PAL clock instead multiplies timeouts whenever that clock is mis-scaled). A forever
+// wait cannot time out, so a false return there is a failed wait and is retried.
 
-TEST_F(TimeoutsTest, SpuriousWakeups_InfiniteWaitStillReceivesValue)
+TEST_F(TimeoutsTest, FailedWaits_InfiniteWaitStillReceivesValue)
 {
     cpromise_t promise{};
     cfuture_t future{};
@@ -163,54 +164,47 @@ TEST_F(TimeoutsTest, SpuriousWakeups_InfiniteWaitStillReceivesValue)
     EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
 }
 
-TEST_F(TimeoutsTest, SpuriousWakeups_FiniteWaitHonoursFullDeadline)
+TEST_F(TimeoutsTest, FalseReturnFromFiniteWait_IsTheTimeoutAndIsNotRetried)
 {
     cpromise_t promise{};
     cfuture_t future{};
     ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
 
-    cfuture::testing::MockSyncController::instance().spurious_wakeups.store(
-        true, std::memory_order_relaxed);
+    auto &mock = cfuture::testing::MockSyncController::instance();
+    mock.fail_wait.store(true, std::memory_order_relaxed);
 
     int32_t err = 0;
-    const auto t0 = std::chrono::steady_clock::now();
-    const bool ok = cfuture_wait_for(&future, 60, nullptr, &err);
-    const auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-            .count();
-
-    EXPECT_FALSE(ok);
+    EXPECT_FALSE(cfuture_wait_for(&future, 60, nullptr, &err));
     EXPECT_EQ(err, CFUTURE_ERR_TIMEOUT);
-    EXPECT_GE(elapsed_ms, 60);
+
+    // Exactly one wait, handed the caller's timeout unchanged.
+    EXPECT_EQ(mock.last_wait_timeout_ms.load(), 60U);
 
     cpromise_drop(&promise, CFUTURE_ERR_DROPPED);
     EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
 }
 
-TEST_F(TimeoutsTest, FailingEventWait_FiniteWaitStillReceivesLateValue)
+TEST_F(TimeoutsTest, BackendTimeoutIsNotMultipliedByASlowPalClock)
 {
+    // The mock really blocks for the requested time; whatever the PAL clock says must not
+    // make the library wait again after the backend reported its timeout.
     cpromise_t promise{};
     cfuture_t future{};
     ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
 
-    cfuture::testing::MockSyncController::instance().fail_wait.store(true,
-                                                                     std::memory_order_relaxed);
+    int32_t err = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    EXPECT_FALSE(cfuture_wait_for(&future, 80, nullptr, &err));
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
 
-    std::thread producer(
-        [&promise]()
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(30));
-            uint32_t value = 99U;
-            cpromise_set_value(&promise, &value, 0);
-        });
+    EXPECT_EQ(err, CFUTURE_ERR_TIMEOUT);
+    EXPECT_GE(elapsed_ms, 80);
+    EXPECT_LT(elapsed_ms, 160);
+    EXPECT_EQ(cfuture::testing::MockSyncController::instance().events[0].wait_count, 1U);
 
-    uint32_t out_val = 0;
-    int32_t err = -999;
-    const bool ok = cfuture_wait_for(&future, 2000, &out_val, &err);
-    producer.join();
-
-    EXPECT_TRUE(ok);
-    EXPECT_EQ(out_val, 99U);
+    cpromise_drop(&promise, CFUTURE_ERR_DROPPED);
 }
 
 TEST_F(TimeoutsTest, StaleLatchedSignal_IsClearedInsteadOfHotSpinning)

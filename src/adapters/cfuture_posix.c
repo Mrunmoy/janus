@@ -14,8 +14,6 @@
 #include <stdint.h>
 #include <time.h>
 
-#define CFUTURE_POSIX_MAX_SPURIOUS_WAKEUPS ((uint32_t)1000U)
-
 /* Deadlines must not move when the wall clock is stepped (NTP, settimeofday), so the
  * condvars are bound to CLOCK_MONOTONIC. macOS has no pthread_condattr_setclock. */
 #if defined(__APPLE__)
@@ -86,7 +84,10 @@ static struct timespec cfuture_posix_calc_deadline(uint32_t timeout_ms)
 }
 
 /**
- * @brief Performs a bounded timed condition wait against a target timespec.
+ * @brief Waits on the condition until signaled or the absolute deadline passes.
+ *
+ * Spurious wakeups are absorbed here: in event mode a false return is the library's
+ * timeout, so it must only happen once the deadline has really passed.
  *
  * @param ev The event primitive.
  * @param ts The absolute deadline.
@@ -94,16 +95,9 @@ static struct timespec cfuture_posix_calc_deadline(uint32_t timeout_ms)
  */
 static bool cfuture_posix_timed_wait_loop(cfuture_posix_event_t *ev, const struct timespec *ts)
 {
-    for (uint32_t wakeups = 0; wakeups < CFUTURE_POSIX_MAX_SPURIOUS_WAKEUPS; ++wakeups)
+    while (!ev->signaled)
     {
-        if (ev->signaled)
-        {
-            ev->signaled = false;
-            return true;
-        }
-
-        int ret = pthread_cond_timedwait(&ev->cond, &ev->mutex, ts);
-        if (ret != 0)
+        if (pthread_cond_timedwait(&ev->cond, &ev->mutex, ts) != 0)
         {
             break;
         }
@@ -149,7 +143,12 @@ static void posix_event_destroy(void *event_handle)
     pthread_mutex_lock(&s_pool_mutex);
 
     cfuture_posix_event_t *ev = (cfuture_posix_event_t *)event_handle;
+
+    /* `signaled` belongs to ev->mutex everywhere else; keep that discipline here. */
+    pthread_mutex_lock(&ev->mutex);
     ev->signaled = false;
+    pthread_mutex_unlock(&ev->mutex);
+
     ev->in_use = false;
 
     pthread_mutex_unlock(&s_pool_mutex);
