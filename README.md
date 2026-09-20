@@ -5,10 +5,10 @@
 [![Language: C11](https://img.shields.io/badge/Language-C11%20(ISO%2FIEC%209899%3A2011)-00599C.svg)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
 [![Dynamic Allocations: 0 Bytes](https://img.shields.io/badge/Dynamic%20Allocations-0%20Bytes%20(Zero--Heap)-brightgreen.svg)]()
 [![Concurrency: Lock--Free](https://img.shields.io/badge/Concurrency-Lock--Free%20Bitmask%20CAS-blueviolet.svg)]()
-[![Line Coverage: 97.5%](https://img.shields.io/badge/Line%20Coverage-97.5%25%20(Linux%20host)-brightgreen.svg)]()
+[![Line Coverage: 97.9%](https://img.shields.io/badge/Line%20Coverage-97.9%25%20(Linux%20host)-brightgreen.svg)]()
 [![ThreadSanitizer: suite passes](https://img.shields.io/badge/ThreadSanitizer-suite%20passes%20(Linux%20host)-success.svg)]()
 [![ASan & UBSan: suite passes](https://img.shields.io/badge/ASan%20%7C%20UBSan-suite%20passes%20(Linux%20host)-success.svg)]()
-[![Core code size: 1.8 KB on Cortex-M4](https://img.shields.io/badge/Core%20code-1.8%20KB%20(Cortex--M4%20--Os)-orange.svg)]()
+[![Core code size: 1.7 KB on Cortex-M4](https://img.shields.io/badge/Core%20code-1.7%20KB%20(Cortex--M4%20--Os)-orange.svg)]()
 [![Library static RAM: 2 words on Cortex-M](https://img.shields.io/badge/Library%20static%20RAM-2%20words%20(Cortex--M)-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -272,11 +272,11 @@ return false; // Contention budget exceeded
 
 For hardware-level clock timing and instruction pipeline relaxation, `libcfuture` introduces an unopinionated Platform Abstraction Layer (`cfuture_pal.h` / `src/cfuture_pal.c`):
 
-- **Monotonic Hardware Clock (`cfuture_pal_time_ms`)**: Returns the platform's monotonic hardware time in milliseconds without requiring an RTOS timer service. It times every `cfuture_wait_for()` deadline in polling mode, and in OSAL event mode whenever `cfuture_pal_clock_is_real()` reports a real clock.
+- **Monotonic Hardware Clock (`cfuture_pal_time_ms`)**: Returns the platform's monotonic hardware time in milliseconds without requiring an RTOS timer service. It times `cfuture_wait_for()` deadlines in polling mode only; with an OSAL event backend the backend's own timeout is the time base and this clock is not consulted.
   - On **ARM Cortex-M**, it weakly hooks `HAL_GetTick()` if linked into the binary. If no board HAL or hardware timer is linked (e.g. during isolated unit testing or before clock init), it increments an internal fallback counter upon each query to guarantee that wait loops deterministically terminate rather than hanging in an infinite loop. **Note**: Because the unlinked fallback counter increments per query rather than in physical real time, real-time millisecond deadline accuracy requires providing a hardware timer or implementing `HAL_GetTick()`.
   - On host systems, it maps directly to `clock_gettime(CLOCK_MONOTONIC)` (POSIX) or `GetTickCount64()` (Win32).
-  - Target firmware can override the weak `cfuture_pal_time_ms()` with its own hardware timer; it should then also override `cfuture_pal_clock_is_real()` to return `true`.
-- **Clock Reliability (`cfuture_pal_clock_is_real`)**: `true` on POSIX and Win32, and on Cortex-M only when `HAL_GetTick()` is linked. With an OSAL event backend and no real clock, `cfuture_wait_for()` uses the backend's own timeout as its time base instead of the call-counting fallback (which would otherwise multiply the wait).
+  - Target firmware can override the weak `cfuture_pal_time_ms()` with its own hardware timer.
+- **Why event mode ignores this clock**: a port's tick can be absent, call-counting, or mis-scaled while looking healthy. On-target testing of an earlier revision that timed event waits with this clock showed a 1,000 ms timeout taking 25 s on a ThreadX build whose `HAL_GetTick()` ran about 25x slow. The RTOS's own timed wait is the more trustworthy time base, so event mode uses it exclusively.
 - **CPU Relax / Pipeline Yield (`cfuture_pal_cpu_relax`)**:
   - On **ARM Cortex-M**, it issues the Thumb-2 `yield` hint instruction, which executes as a NOP: it saves no power and does not invoke an RTOS scheduler (it was chosen over `WFI` to avoid that instruction's check-then-sleep race).
   - On POSIX it calls `sched_yield()`. On Win32 it calls `YieldProcessor()`, a spin-wait `pause` hint that does not give up the timeslice.
@@ -297,7 +297,7 @@ typedef struct
     /** Signals the event (task context; interrupt context too if event_set_from_isr is NULL). */
     void (*event_set)(void *event_handle);
     /** Waits for the event to be signaled, with timeout in ms (UINT32_MAX = forever).
-     *  Returns true if signaled. With a real PAL clock the result is only a wakeup hint. */
+     *  Returns true if signaled; false from a finite wait means the timeout elapsed. */
     bool (*event_wait)(void *event_handle, uint32_t timeout_ms);
     /** Resets the event: before slot reuse, and when a wait reports a signal although nothing
      *  resolved (optional, can be NULL; provide it for manual-reset events). */
@@ -554,7 +554,7 @@ Blocks the calling task until the promise is resolved, dropped, or the timeout e
 - `out_status`: Receives the worker's status code (`0` = `CFUTURE_OK`, or whatever the worker passed to `cpromise_drop()`, e.g. `CFUTURE_ERR_DROPPED`), `CFUTURE_ERR_TIMEOUT` on timeout, or `CFUTURE_ERR_INVALID` for a NULL, stale, duplicated or already-consumed handle (optional, can be `NULL`).
 - **Returns**: `true` if completed successfully; `false` on timeout, worker abort, or an invalid handle.
 - **Lifecycle Effect**: Releases the consumer hold; if it was the last hold, the slot is recycled.
-- **Timeout behaviour**: with a real PAL clock (`cfuture_pal_clock_is_real()`), the wait is decided only by the slot state and `cfuture_pal_time_ms()`; the OSAL `event_wait` result is a wakeup hint, so spurious wakeups, failing waits, or adapters that cap long waits do not produce a false `CFUTURE_ERR_TIMEOUT`. A finite timeout never fires early; it overshoots by at least one PAL clock tick plus scheduling latency. `UINT32_MAX` waits until resolved. Without a real clock (Cortex-M with neither `HAL_GetTick()` nor a PAL override) and with an event backend, the backend's own timeout is the time base: the wait is as accurate as the backend, and a backend that returns early without a signal ends the wait early. A stale signal on a latching (manual-reset) backend is cleared via `event_reset` rather than spun on.
+- **Timeout behaviour**: in OSAL event mode the backend's own timed wait is the time base: `cfuture_wait_for()` hands it `timeout_ms` and treats a `false` return as the timeout, so the wait is exactly as accurate as the backend and is never re-issued against another clock. A `true` return with nothing resolved is a stale signal: it is cleared through `event_reset` (when provided) and the wait is issued again, at most 2 times, after which the call falls back to polling; each such re-wait restarts the timeout, so stale signals can lengthen a wait but never shorten it. A `false` return from a `UINT32_MAX` wait is treated as a failed wait and retried. In polling mode the deadline is timed by `cfuture_pal_time_ms()`: it never fires early and overshoots by at least one clock tick, and it is only as accurate as that clock.
 
 ```c
 void cfuture_abandon(cfuture_t *future);
@@ -607,7 +607,7 @@ Declared in `include/cfuture_pal.h`:
 uint32_t cfuture_pal_time_ms(void);
 void cfuture_pal_cpu_relax(void);
 ```
-- `cfuture_pal_time_ms`: Times every wait deadline (polling and OSAL event mode). Returns monotonic elapsed time in milliseconds when linked with a platform timer (e.g. `HAL_GetTick()`, `clock_gettime()`, or `GetTickCount64()`). When unlinked on ARM Cortex-M, advances an internal fallback counter per call to guarantee bounded timeout termination; real-time millisecond accuracy requires linking a hardware clock.
+- `cfuture_pal_time_ms`: Times wait deadlines in polling mode only. Returns monotonic elapsed time in milliseconds when linked with a platform timer (e.g. `HAL_GetTick()`, `clock_gettime()`, or `GetTickCount64()`). When unlinked on ARM Cortex-M, advances an internal fallback counter per call to guarantee bounded timeout termination; real-time millisecond accuracy requires linking a hardware clock.
 - `cfuture_pal_cpu_relax`: Issues architecture-appropriate low-power yield. Emits Thumb-2 `yield` instruction on ARM Cortex-M, `sched_yield()` on POSIX, or `YieldProcessor()` on Win32.
 
 ---
@@ -621,7 +621,7 @@ Platform adapters implement `cfuture_sync_ops_t` (`include/cfuture_osal.h`):
 | `void *(*event_create)(void)` | Allocates/initializes one event per slot | `cfuture_pool_init()` | Needed for event mode. If `NULL`, slots get no event and the pool silently runs in polling mode |
 | `void (*event_destroy)(void *event_handle)` | Frees the event | `cfuture_pool_destroy()`, and init rollback | Optional |
 | `void (*event_set)(void *event_handle)` | Signals the event to wake the waiter | Producer task; also **interrupt context** when `event_set_from_isr` is `NULL` | Needed whenever `event_wait` is set, otherwise task-context resolutions never wake the waiter before its timeout |
-| `bool (*event_wait)(void *event_handle, uint32_t timeout_ms)` | Blocks until signaled or timeout (`UINT32_MAX` = forever). Returns `true` on signal. With a real PAL clock the result is only a wakeup hint | Waiting task | Needed for event mode. If `NULL`, `cfuture_wait_for()` polls |
+| `bool (*event_wait)(void *event_handle, uint32_t timeout_ms)` | Blocks until signaled or timeout (`UINT32_MAX` = forever). Returns `true` on signal. Must return `false` only once `timeout_ms` has elapsed (absorb spurious wakeups inside the adapter): in event mode that return *is* the library's timeout | Waiting task | Needed for event mode. If `NULL`, `cfuture_wait_for()` polls |
 | `void (*event_reset)(void *event_handle)` | Clears the event | `cfuture_create()` (any creator task) and the waiting task (stale signal) | Optional; provide it for manual-reset events |
 | `void (*event_set_from_isr)(void *event_handle)` | Signals the event using an ISR-safe kernel API | **Interrupt context** | Optional (falls back to `event_set`) |
 
@@ -803,7 +803,7 @@ void DMA2_Stream0_IRQHandler(void)
 | **Bare-Metal / Polling** | `adapters/cfuture_polling.h` (or `NULL`) | None: polls slot state with `cfuture_pal_cpu_relax()` | Yes (nothing to signal) | None | Yes, on Linux |
 | **FreeRTOS / ThreadX / Zephyr** | Not in this repo: `targets/<os>/osal/` in the companion [STM32F407VGT6](https://github.com/Mrunmoy/STM32F407VGT6) repo | e.g. FreeRTOS static binary semaphores | Depends on the adapter's `event_set_from_isr` | Static tables in the adapter | **No.** Nothing in this repo builds or tests them, and that repo vendors its own copy of this library |
 
-Uncontended single-thread call overhead on an Intel Core i7-8700K (Clang 21, `-O3`), from `bench_throughput`: about 70-73 ns per create → fulfil → wait cycle with the POSIX backend and about 58 ns in polling mode. Nothing blocks in that benchmark, so these are API call costs, not wake-up latencies; no RTOS or Win32 figures have been measured.
+Uncontended single-thread call overhead on an Intel Core i7-8700K (Clang 21, `-O3`), from `bench_throughput`: about 72-75 ns per create → fulfil → wait cycle with the POSIX backend and about 58 ns in polling mode. Nothing blocks in that benchmark, so these are API call costs, not wake-up latencies; no RTOS or Win32 figures have been measured.
 
 ---
 
@@ -890,18 +890,18 @@ Host object sizes, release build inside the Nix dev shell (`clang 21.1.8 -O3 -DN
 ```text
 --- Binary Footprint (size) ---
    text    data     bss     dec     hex filename
-   4304       0       8    4312    10d8 cfuture.c.o
-    266       0       0     266     10a cfuture_pal.c.o
+   4160       0       8    4168    1048 cfuture.c.o
+    218       0       0     218      da cfuture_pal.c.o
     117       0       0     117      75 cfuture_polling.c.o
-   1158      48   12337   13543    34e7 cfuture_posix.c.o
+   1142      48   12337   13527    34d7 cfuture_posix.c.o
 ```
 
 Cross-compiled objects (`arm-none-eabi-gcc 15.3 -std=c11 -Os -mthumb`; compiled only, not linked or run on hardware):
 
 | Target | `cfuture.c` text | `cfuture_pal.c` text | `.bss` |
 | :--- | :--- | :--- | :--- |
-| Cortex-M4 | 1,768 bytes | 64 bytes | 4 + 4 bytes |
-| Cortex-M0+ | 1,760 bytes | 60 bytes | 4 + 4 bytes (plus the `__atomic_*` helpers the integrator must supply) |
+| Cortex-M4 | 1,660 bytes | 44 bytes | 4 + 4 bytes |
+| Cortex-M0+ | 1,640 bytes | 40 bytes | 4 + 4 bytes (plus the `__atomic_*` helpers the integrator must supply) |
 
 - **Library static RAM**: two `uint_fast32_t` words on Cortex-M: the pool-init epoch counter in the core, and the PAL's fallback tick (unused once `HAL_GetTick()` is linked; gone if `cfuture_pal_time_ms()` is overridden). On the x86-64 host it is one 8-byte word. All pool, slot and payload storage is caller-provided. The POSIX adapter's static event table (about 12 KB) is host-only.
 - **Dynamic Heap Memory (`malloc`/`free`)**: none; `build.py --stats` fails if `nm` finds an allocation symbol in `libcfuture.a`.
@@ -915,7 +915,7 @@ Cross-compiled objects (`arm-none-eabi-gcc 15.3 -std=c11 -Os -mthumb`; compiled 
 | Cycle | POSIX event backend | Polling mode |
 | :--- | :--- | :--- |
 | Create → Abandon → Drop | ~59 ns (~17 M/s) | ~52 ns (~19 M/s) |
-| Create → Fulfill → Wait | ~70-73 ns (~14 M/s) | ~58 ns (~17 M/s) |
+| Create → Fulfill → Wait | ~72-75 ns (~13-14 M/s) | ~58 ns (~17 M/s) |
 
 Each side pays one extra CAS per transaction for its generation-checked claim; that is the cost of stale and duplicated handles being harmless.
 
@@ -931,15 +931,15 @@ The test harness comprises 11 suites, all run on a Linux x86-64 host. Everything
 | :--- | :--- | :--- |
 | **`test_pool_init`** | `build/tests/test_pool_init` | Argument validation of `cfuture_pool_init()` / `cfuture_create()`, slot initialisation, sequential allocation until full, polling-mode wait with no sync ops. |
 | **`test_lifecycle`** | `build/tests/test_lifecycle` | Create/fulfil/consume, drop, abandon, slot reuse, zero-size and struct payloads, NULL-payload completion not leaking the previous occupant's data, a full cycle through `cfuture_polling_sync_ops()`. |
-| **`test_timeouts`** | `build/tests/test_timeouts` | Zero timeout, timed-out waits, spurious and failing OSAL waits, stale latched signals, the largest finite timeout. |
+| **`test_timeouts`** | `build/tests/test_timeouts` | Zero timeout, timed-out waits, the OSAL wait contract (a false return is the timeout and is not retried; failed forever-waits are retried; the backend timeout is not multiplied), stale latched signals, the largest finite timeout. |
 | **`test_isr_safety`** | `build/tests/test_isr_safety` | The `_from_isr` entry points call the ISR sync hook and deliver / drop / recycle correctly, including an ISR-only backend with no `event_set`. Called from an ordinary thread through the mock: no real interrupt, pre-emption or re-entrancy is exercised. |
 | **`test_typed_pool`** | `build/tests/test_typed_pool` | Every generated wrapper of one typed pool, including ISR variants and cancel, and rejection of a pool with a different payload size. |
 | **`test_concurrency_stress`** | `build/tests/test_concurrency_stress` | 100k multi-threaded producer/consumer cycles, a duplicate-producer race, a stale-handle hammer. |
 | **`test_error_injection`** | `build/tests/test_error_injection` | Event-creation failure and rollback, NULL / out-of-range / invalidated handles, double wait / fulfil / abandon / drop, pool saturation and recovery, custom drop codes. |
 | **`test_generation`** | `build/tests/test_generation` | Stale, duplicated and forged handles, generation wrap, pool re-init, `cfuture_cancel()`. |
 | **`test_posix_adapter`** | `build/tests/test_posix_adapter` | POSIX event latch/reset/timeout semantics, lost-wakeup ping-pong. |
-| **`test_pal_fallback`** | `build/tests/test_pal_fallback` | Waits when the PAL has no real clock (call-counting clock, honest blocking backend): the timeout is not multiplied, values still arrive, stale signals are handled, polling still terminates. |
-| **`test_stress_chaos`** | `build/tests/test_stress_chaos` | Randomised multi-threaded scenarios (timeouts, abandons, drops, duplicates, cancels, stale replays) in event, polling and hostile-OSAL modes (waits that return early, fake signals, no `event_reset`). |
+| **`test_pal_fallback`** | `build/tests/test_pal_fallback` | Waits when the PAL clock only counts calls while the backend blocks for real: the timeout is not multiplied, values still arrive, stale signals are handled, polling still terminates. |
+| **`test_stress_chaos`** | `build/tests/test_stress_chaos` | Randomised multi-threaded scenarios (timeouts, abandons, drops, duplicates, cancels, stale replays) in event, polling and hostile-OSAL modes (frequent fake signals and no `event_reset`). |
 
 **Not tested anywhere in this repository**: the Win32 adapter and Win32 PAL branch (never compiled here), the Cortex-M PAL branch (compile-checked with `arm-none-eabi-gcc` only), any RTOS adapter, any real interrupt context, any hardware, macOS, and MSVC. There is no CI; the results below come from running `build.py` locally in the Nix shell.
 
@@ -1041,7 +1041,7 @@ nix develop -c python3 build.py --all
 │   ├── test_error_injection.cpp  # OS failure simulation & rollback tests
 │   ├── test_generation.cpp       # Stale/duplicate handle, generation wrap & cancel tests
 │   ├── test_posix_adapter.cpp    # Direct POSIX adapter semantics tests
-│   ├── test_pal_fallback.cpp     # Waits when the PAL has no real clock
+│   ├── test_pal_fallback.cpp     # Waits when the PAL clock is not a real ms clock
 │   └── test_stress_chaos.cpp     # Randomised multi-threaded chaos test
 ├── benchmarks/
 │   ├── CMakeLists.txt

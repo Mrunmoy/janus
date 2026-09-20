@@ -136,7 +136,7 @@ def main():
   - `cfuture_sync_ops_t` getter for the active OS.
   - Generic message queue: `osal_queue_create`, `osal_queue_send`, `osal_queue_receive`.
   - Generic task creation: `osal_task_create`, `osal_delay_ms`, `osal_get_time_ms`.
-  - A real millisecond tick behind `cfuture_pal_time_ms()` on every target (link `HAL_GetTick()` or override the weak symbol). With a real tick, `janus` times every `cfuture_wait_for()` deadline with it, including waits on an injected OSAL event (whose `event_wait` result is then only a wakeup hint). If the tick is provided by overriding `cfuture_pal_time_ms()` rather than by `HAL_GetTick()`, also override `cfuture_pal_clock_is_real()` to return `true`. Each `cfuture_sync_ops_t` must latch a set that arrives before the wait and should provide `event_reset`.
+  - Each `cfuture_sync_ops_t` must latch a set that arrives before the wait, should provide `event_reset`, and its `event_wait` must return `false` only once the timeout has elapsed: in event mode that backend timeout is `janus`'s only time base. `cfuture_pal_time_ms()` matters only for pools run in polling mode.
 - **Task 1.3**: Create `app/include/pal/` defining unified PAL interfaces (`PalLed`, `PalTimeSource`, `PalLogSink`, `PalStorage`) and block storage initialization, read, write, and FatFS disk status hooks.
 - **Task 1.4**: Integrate ChaN's FatFS under `third_party/fatfs/` (`ff.c`, `ff.h`, `diskio.h`, `ffconf.h`).
 - **Task 1.5**: Implement common application files:
