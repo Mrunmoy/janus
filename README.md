@@ -5,7 +5,7 @@
 [![Language: C11](https://img.shields.io/badge/Language-C11%20(ISO%2FIEC%209899%3A2011)-00599C.svg)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
 [![Dynamic Allocations: 0 Bytes](https://img.shields.io/badge/Dynamic%20Allocations-0%20Bytes%20(Zero--Heap)-brightgreen.svg)]()
 [![Concurrency: Lock--Free](https://img.shields.io/badge/Concurrency-Lock--Free%20Bitmask%20CAS-blueviolet.svg)]()
-[![Code Coverage: 92.5%](https://img.shields.io/badge/Line%20Coverage-92.5%25-brightgreen.svg)]()
+[![Code Coverage: 97.8%](https://img.shields.io/badge/Line%20Coverage-97.8%25-brightgreen.svg)]()
 [![ThreadSanitizer Clean](https://img.shields.io/badge/ThreadSanitizer-Verified%20(100k%20Cycles)-success.svg)]()
 [![ASan & UBSan Clean](https://img.shields.io/badge/Sanitizers-ASan%20%7C%20UBSan%20Clean-success.svg)]()
 [![ROM Footprint: < 6 KB](https://img.shields.io/badge/ROM%20Footprint-%3C%206%20KB%20(5617%20Bytes)-orange.svg)]()
@@ -198,9 +198,11 @@ When an operation takes longer than the caller can tolerate, the servicer requir
 
 ### Dual-Owner Reference Counting Protocol ($2 \to 1 \to 0$)
 
-Every slot in a `cfuture_pool_t` is governed by an atomic reference count initialized to **2**:
-- **Owner 1**: The Consumer handle (`cfuture_t`), held by the requester task.
-- **Owner 2**: The Producer handle (`cpromise_t`), held by the servicer task or ISR.
+Every slot in a `cfuture_pool_t` starts with **2** holders, tracked as one hold bit per side in the slot's atomic `owner` word:
+- **Owner 1** (`CFUTURE_HOLD_CONSUMER`): The Consumer handle (`cfuture_t`), held by the requester task.
+- **Owner 2** (`CFUTURE_HOLD_PRODUCER`): The Producer handle (`cpromise_t`), held by the servicer task or ISR.
+
+The holder count still walks $2 \to 1 \to 0$, but because each side can only ever clear *its own* bit, a duplicated or replayed handle can never release the other side's hold (a plain counter cannot tell whose decrement it is receiving).
 
 ```mermaid
 graph TD
@@ -217,6 +219,13 @@ graph TD
 When task $T_A$ times out, its consumer drop decrements the slot reference count from $2 \to 1$. **Crucially, the slot is NOT recycled back to the pool.** Because its bit remains set in `allocated_mask`, concurrent task $T_B$ **cannot claim this slot**. 
 
 Only when servicer task $T_S$ pops $T_A$'s request from the queue and drops the producer reference does the reference count transition from $1 \to 0$. The final owner performs the atomic slot recycling, guaranteeing that a slot can never be reused while a reference to it remains inside an OS queue.
+
+#### Generation-Tagged Handles & Exclusive Claims
+Handles are plain structs and get copied (into queue messages, retry paths, ISR contexts), so the library also defends against a handle that is used twice or outlives its slot:
+
+- **Generation tag**: the `owner` word is `(generation << CFUTURE_GEN_SHIFT) | hold bits`. Every recycle bumps the generation (wrapping at `CFUTURE_GEN_MASK` and skipping 0, which is never valid). `cfuture_t` / `cpromise_t` carry the generation they were created with.
+- **Exclusive claim**: before touching a slot, `cpromise_set_value()` / `cpromise_drop()` claim the producer side and `cfuture_wait_for()` / `cfuture_abandon()` claim the consumer side with a single bounded CAS on `owner`. That one CAS verifies the generation, verifies the side's hold bit is still present, and sets the side's claim bit.
+- **Effect**: a stale handle (slot already recycled, possibly reallocated), a forged handle to an unallocated slot, or the second of two concurrent calls on copies of the same handle all fail the claim and become no-ops (`cfuture_wait_for()` reports `CFUTURE_ERR_INVALID`). They cannot write the payload arena, signal the event, complete the slot's next occupant, or double-release a hold.
 
 ---
 
@@ -512,8 +521,8 @@ Destroys all OS events within the pool and cleans up synchronization handles.
 bool cfuture_create(cfuture_pool_t *pool, cpromise_t *out_promise, cfuture_t *out_future);
 ```
 Atomically claims an available slot from the pool bitmask using lock-free CAS.
-- Initializes slot reference count to **2** and state to `CFUTURE_STATE_PENDING`.
-- Populates `out_promise` and `out_future` handles.
+- Sets both hold bits (consumer + producer) and state to `CFUTURE_STATE_PENDING`.
+- Populates `out_promise` and `out_future` handles, stamped with the slot's current generation.
 - **Returns**: `true` if a slot was allocated, `false` if the pool is saturated or contention budget exceeded.
 
 ---
@@ -530,13 +539,22 @@ Blocks the calling task until the promise is resolved, dropped, or the timeout e
 - `out_status`: Receives integer status code (`0` = `CFUTURE_OK`, or an error code like `CFUTURE_ERR_TIMEOUT`, `CFUTURE_ERR_DROPPED`, `CFUTURE_ERR_ABANDONED`) (optional, can be `NULL`).
 - **Returns**: `true` if completed successfully; `false` on timeout, worker abort, or abandonment.
 - **Lifecycle Effect**: Releases the consumer reference ($2 \to 1$ or $1 \to 0$).
+- **Timeout guarantee**: the wait is decided only by the slot state and `cfuture_pal_time_ms()`. The OSAL `event_wait` result is treated as a wakeup hint, so spurious wakeups, failing waits, or adapters that cap long waits can never produce a false `CFUTURE_ERR_TIMEOUT`. A finite timeout never fires early (it may overshoot by one clock tick); `UINT32_MAX` really waits forever.
 
 ```c
 void cfuture_abandon(cfuture_t *future);
 ```
 Explicitly abandons the future without waiting.
-- Transitions pending slot to `CFUTURE_STATE_ABANDONED` and decrements consumer reference.
+- Transitions pending slot to `CFUTURE_STATE_ABANDONED` and releases the consumer hold.
 - Invalidates the `future` handle immediately upon return.
+
+```c
+bool cfuture_cancel(cpromise_t *promise, cfuture_t *future);
+```
+Aborts an **undispatched** pair (e.g. the queue send failed), releasing both ends in one atomic step and returning the slot to the pool immediately.
+- Succeeds only while both sides still hold the slot and neither has started waiting or resolving. This is not cancellation of a running worker: once the worker has begun `cpromise_set_value()` / `cpromise_drop()`, cancel fails.
+- If a copy of the promise did reach a worker, that copy becomes stale and is rejected by its generation tag.
+- **Returns**: `true` and invalidates both handles on success; `false` (handles untouched) if they are invalid, stale, not a pair, or either side has already acted.
 
 ---
 
@@ -561,7 +579,7 @@ Aborts the promise without a payload (fails the waiting consumer).
 ```c
 bool cpromise_is_active(const cpromise_t *promise);
 ```
-Returns `true` if the slot is still in `CFUTURE_STATE_PENDING` (caller is actively waiting). Returns `false` if the caller timed out or abandoned the request.
+Returns `true` if the slot is still in `CFUTURE_STATE_PENDING` (caller is actively waiting). Returns `false` if the caller timed out or abandoned the request, or if the handle is stale (its slot was recycled).
 
 ---
 
@@ -609,6 +627,7 @@ Generates:
 - `bool subsystem_name##_create(cfuture_pool_t *pool, subsystem_name##_promise_t *p, subsystem_name##_future_t *f)`
 - `bool subsystem_name##_future_wait(subsystem_name##_future_t *f, uint32_t timeout_ms, payload_type *out_val, int32_t *out_status)`
 - `void subsystem_name##_future_abandon(subsystem_name##_future_t *f)`
+- `bool subsystem_name##_cancel(subsystem_name##_promise_t *p, subsystem_name##_future_t *f)`
 - `bool subsystem_name##_promise_is_active(const subsystem_name##_promise_t *p)`
 - `void subsystem_name##_promise_set(subsystem_name##_promise_t *p, const payload_type *val, int32_t status_code)`
 - `void subsystem_name##_promise_drop(subsystem_name##_promise_t *p, int32_t status_code)`
@@ -697,7 +716,12 @@ bool save_audio_sample_safe(uint32_t sector, const uint8_t *data, uint32_t timeo
     memcpy(req.write_buffer, data, 512);
     req.promise = promise;
 
-    os_queue_send(g_storage_queue, &req, 0);
+    if (!os_queue_send(g_storage_queue, &req, 0))
+    {
+        // Servicer never saw the promise: return the slot to the pool right now.
+        (void)cfuture_cancel(&promise, &future);
+        return false;
+    }
 
     // 3. Block waiting for result with strict real-time deadline
     storage_response_t result;
@@ -711,7 +735,7 @@ bool save_audio_sample_safe(uint32_t sector, const uint8_t *data, uint32_t timeo
 
     // TIMEOUT OR CANCELLATION:
     // T_A safely returns and unwinds its call stack immediately!
-    // The slot remains locked (refcount=1) until T_S dequeues the promise.
+    // The slot remains locked (producer hold) until T_S dequeues the promise.
     // ZERO dangling stack pointers, ZERO Queue ABA collisions.
     return false;
 }
@@ -758,14 +782,14 @@ void DMA2_Stream0_IRQHandler(void)
 
 ### Native POSIX Adapter (Linux / macOS)
 
-Ideal for workstation unit tests, CI pipelines, and desktop simulations:
+Ideal for workstation unit tests, CI pipelines, and desktop simulations. Timed waits run on `CLOCK_MONOTONIC` (wall-clock steps do not move deadlines; macOS falls back to `CLOCK_REALTIME`), and `UINT32_MAX` blocks until signaled:
 ```c
 #include "cfuture.h"
 #include "adapters/cfuture_posix.h"
 
 cfuture_pool_init(&pool, CAPACITY, sizeof(packet_t),
                   slots_memory, arena_memory,
-                  cfuture_posix_get_sync_ops());
+                  cfuture_posix_sync_ops());
 ```
 
 ---
@@ -779,7 +803,7 @@ Provides native Win32 Event synchronization for Visual Studio and MinGW environm
 
 cfuture_pool_init(&pool, CAPACITY, sizeof(packet_t),
                   slots_memory, arena_memory,
-                  cfuture_win32_get_sync_ops());
+                  cfuture_win32_sync_ops());
 ```
 
 ---
@@ -793,7 +817,7 @@ Zero-dependency adapter using atomic flag spinning with configurable busy-wait l
 
 cfuture_pool_init(&pool, CAPACITY, sizeof(packet_t),
                   slots_memory, arena_memory,
-                  cfuture_polling_get_sync_ops());
+                  cfuture_polling_sync_ops());
 ```
 
 ---
@@ -861,13 +885,14 @@ Measured on release library build (`gcc 13.3.0 -O3 -DNDEBUG`):
 
 ### Latency & Throughput Benchmarks
 
-Executed on an Intel x86_64 host (3.2 GHz) over 100,000 continuous cycles:
+Executed on an Intel Core i7-8700K host (Clang 21, `-O3`) over 100,000 continuous cycles:
 
 | Operation | Latency (ns/op) | Throughput (ops/sec) |
 | :--- | :--- | :--- |
-| **Slot Claim + Immediate Drop** | **44.8 ns** | **22,309,656 ops/sec** |
-| **Complete Roundtrip Cycle** (Create $\to$ Fulfill $\to$ Wait $\to$ Drop) | **55.5 ns** | **18,009,626 ops/sec** |
-| **State Inspection Query** (`cfuture_is_ready`) | **~3.2 ns** | **> 300,000,000 ops/sec** |
+| **Slot Claim + Immediate Drop** | **~58 ns** | **~17,000,000 ops/sec** |
+| **Complete Roundtrip Cycle** (Create $\to$ Fulfill $\to$ Wait $\to$ Drop) | **~70 ns** | **~14,000,000 ops/sec** |
+
+Each side pays one extra CAS per transaction for its generation-checked claim; that is the cost of stale and duplicated handles being harmless.
 
 ---
 
@@ -875,17 +900,20 @@ Executed on an Intel x86_64 host (3.2 GHz) over 100,000 continuous cycles:
 
 ### GoogleTest Test Suite Matrix
 
-The test harness comprises 7 dedicated suites executing 100% clean in **0.22 seconds**:
+The test harness comprises 10 dedicated suites. Everything except the time-boxed chaos run finishes in under a second; `test_stress_chaos` runs 1.5 s per sync mode by default (set `CFUTURE_STRESS_MS` for longer soaks):
 
 | Test Suite | Binary Target | Coverage Focus |
 | :--- | :--- | :--- |
 | **`test_pool_init`** | `build/tests/test_pool_init` | Capacity validation, parameter boundary checking, static arena alignment. |
 | **`test_lifecycle`** | `build/tests/test_lifecycle` | Valid state transitions, payload fidelity, immediate drop cleanup. |
-| **`test_timeouts`** | `build/tests/test_timeouts` | Deadline expiration, timeout state pinning, consumer unwinding. |
+| **`test_timeouts`** | `build/tests/test_timeouts` | Deadline expiration, timeout state pinning, consumer unwinding, spurious / failing OSAL waits. |
 | **`test_isr_safety`** | `build/tests/test_isr_safety` | Reentrant completion, zero-context fulfillment, ISR event flags. |
 | **`test_typed_pool`** | `build/tests/test_typed_pool` | Type-safe macro wrappers, multi-pool isolation, compiler strictness. |
-| **`test_concurrency_stress`** | `build/tests/test_concurrency_stress` | High-frequency multi-threaded race conditions (100k cycles). |
+| **`test_concurrency_stress`** | `build/tests/test_concurrency_stress` | High-frequency multi-threaded race conditions (100k cycles), duplicate-producer race, stale-handle hammer. |
 | **`test_error_injection`** | `build/tests/test_error_injection` | Mock sync failure, OS event creation failure, CAS saturation rollback. |
+| **`test_generation`** | `build/tests/test_generation` | Stale, duplicated and forged handles, generation wrap, `cfuture_cancel()`. |
+| **`test_posix_adapter`** | `build/tests/test_posix_adapter` | POSIX event latch/reset/timeout semantics, lost-wakeup ping-pong. |
+| **`test_stress_chaos`** | `build/tests/test_stress_chaos` | Randomised multi-threaded scenarios (timeouts, abandons, drops, duplicates, cancels, stale replays) in event and polling modes. |
 
 ---
 
@@ -918,7 +946,7 @@ python3 build.py --all
 | Flag | Purpose |
 | :--- | :--- |
 | `python3 build.py --build` | Configures and builds Release library in `build/`. |
-| `python3 build.py --test` | Executes full 7-suite CTest verification suite. |
+| `python3 build.py --test` | Executes full 10-suite CTest verification suite. |
 | `python3 build.py --tsan` | Builds and runs 100k cycle ThreadSanitizer suite in `build_tsan/`. |
 | `python3 build.py --asan` | Builds and runs ASan & UBSan suite in `build_asan/`. |
 | `python3 build.py --stats` | Measures ROM/RAM size and verifies zero dynamic memory symbols via `nm`. |
@@ -973,7 +1001,10 @@ nix develop
 │   ├── test_isr_safety.cpp       # ISR completion & reentrancy tests
 │   ├── test_typed_pool.cpp       # Macro-generated typed wrapper tests
 │   ├── test_concurrency_stress.cpp # High-throughput multi-threaded stress test
-│   └── test_error_injection.cpp  # OS failure simulation & rollback tests
+│   ├── test_error_injection.cpp  # OS failure simulation & rollback tests
+│   ├── test_generation.cpp       # Stale/duplicate handle, generation wrap & cancel tests
+│   ├── test_posix_adapter.cpp    # Direct POSIX adapter semantics tests
+│   └── test_stress_chaos.cpp     # Randomised multi-threaded chaos test
 ├── benchmarks/
 │   └── bench_throughput.cpp      # Latency & throughput micro-benchmarking
 ├── examples/
