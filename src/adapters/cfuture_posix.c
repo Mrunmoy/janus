@@ -149,7 +149,12 @@ static void posix_event_destroy(void *event_handle)
     pthread_mutex_lock(&s_pool_mutex);
 
     cfuture_posix_event_t *ev = (cfuture_posix_event_t *)event_handle;
+
+    /* `signaled` belongs to ev->mutex everywhere else; keep that discipline here. */
+    pthread_mutex_lock(&ev->mutex);
     ev->signaled = false;
+    pthread_mutex_unlock(&ev->mutex);
+
     ev->in_use = false;
 
     pthread_mutex_unlock(&s_pool_mutex);

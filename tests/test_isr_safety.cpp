@@ -93,3 +93,26 @@ TEST_F(IsrSafetyTest, IsrFulfill_AfterCallerTimeout_SafelyRecyclesSlot)
               (uint_fast32_t)CFUTURE_STATE_IDLE);
     EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
 }
+
+TEST_F(IsrSafetyTest, IsrSignalIsDeliveredEvenWithoutATaskLevelEventSet)
+{
+    // An ISR-only backend: event_set_from_isr provided, event_set left NULL.
+    cfuture_pool_destroy(&pool);
+    cfuture::testing::MockSyncController::instance().reset();
+    cfuture_sync_ops_t ops = cfuture::testing::MockSyncController::instance().getSyncOps();
+    ops.event_set = nullptr;
+    ASSERT_TRUE(cfuture_pool_init(&pool, 2, sizeof(uint32_t), slots, payload_arena, &ops));
+
+    cpromise_t promise{};
+    cfuture_t future{};
+    ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
+
+    uint32_t value = 77U;
+    cpromise_set_value_from_isr(&promise, &value, 0);
+
+    EXPECT_EQ(cfuture::testing::MockSyncController::instance().events[0].isr_set_count, 1U);
+
+    uint32_t out = 0;
+    EXPECT_TRUE(cfuture_wait_for(&future, 100, &out, nullptr));
+    EXPECT_EQ(out, 77U);
+}

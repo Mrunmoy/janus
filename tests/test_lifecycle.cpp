@@ -1,3 +1,4 @@
+#include "adapters/cfuture_polling.h"
 #include "cfuture.h"
 #include "mock_sync_ops.hpp"
 
@@ -240,4 +241,36 @@ TEST_F(LifecycleTest, NullPayloadCompletion_DoesNotLeakPreviousOccupantData)
     out = 0x55555555U;
     EXPECT_TRUE(cfuture_wait_for(&future, 0, &out, nullptr));
     EXPECT_EQ(out, 0U);
+}
+
+TEST(PollingAdapterTest, FullCycleThroughThePollingAdapterTable)
+{
+    cfuture_slot_t polled_slots[2];
+    uint8_t polled_arena[2 * sizeof(uint32_t)];
+    cfuture_pool_t polled_pool;
+    ASSERT_TRUE(cfuture_pool_init(&polled_pool, 2, sizeof(uint32_t), polled_slots, polled_arena,
+                                  cfuture_polling_sync_ops()));
+    EXPECT_EQ(polled_slots[0].event_handle, nullptr);
+
+    cpromise_t promise{};
+    cfuture_t future{};
+    ASSERT_TRUE(cfuture_create(&polled_pool, &promise, &future));
+
+    int32_t status = 0;
+    uint32_t value = 31U;
+    cpromise_set_value(&promise, &value, 0);
+
+    uint32_t out = 0;
+    EXPECT_TRUE(cfuture_wait_for(&future, 50, &out, &status));
+    EXPECT_EQ(out, 31U);
+    EXPECT_EQ(status, 0);
+
+    // And a polled timeout.
+    ASSERT_TRUE(cfuture_create(&polled_pool, &promise, &future));
+    EXPECT_FALSE(cfuture_wait_for(&future, 5, nullptr, &status));
+    EXPECT_EQ(status, CFUTURE_ERR_TIMEOUT);
+    cpromise_drop(&promise, CFUTURE_ERR_DROPPED);
+
+    EXPECT_EQ(polled_pool.allocated_mask.load(std::memory_order_acquire), 0U);
+    cfuture_pool_destroy(&polled_pool);
 }

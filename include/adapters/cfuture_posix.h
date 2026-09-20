@@ -2,8 +2,9 @@
  * @file cfuture_posix.h
  * @brief Zero-Heap POSIX Synchronization Adapter for cfuture
  *
- * Provides a production-grade pthread condition-variable backend for host testing
- * and Linux/POSIX targets. Statically pools event primitives with zero dynamic memory.
+ * Provides a pthread condition-variable backend for host testing and Linux/POSIX
+ * targets. Events come from a process-wide static table of CFUTURE_POSIX_MAX_EVENTS shared
+ * by all pools. Statically pools event primitives with zero dynamic memory.
  * Timed waits run on CLOCK_MONOTONIC (CLOCK_REALTIME on macOS, which lacks
  * pthread_condattr_setclock), and a UINT32_MAX timeout blocks until signaled.
  *

@@ -135,3 +135,33 @@ TEST_F(TypedPoolTest, TypedCancelReleasesUndispatchedPair)
     EXPECT_EQ(future.pool, nullptr);
     EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
 }
+
+TEST_F(TypedPoolTest, TypedWrappersRejectAPoolWithADifferentPayloadSize)
+{
+    // A pool sized for a smaller payload: a typed wait would overflow the caller's struct
+    // the other way round, and here would read past the slot's arena.
+    cfuture_slot_t small_slots[2];
+    uint8_t small_arena[2 * sizeof(uint8_t)];
+    cfuture_pool_t small_pool;
+    ASSERT_TRUE(
+        cfuture_pool_init(&small_pool, 2, sizeof(uint8_t), small_slots, small_arena, nullptr));
+
+    Motor_promise_t promise{};
+    Motor_future_t future{};
+    EXPECT_FALSE(Motor_create(&small_pool, &promise, &future));
+    EXPECT_EQ(small_pool.allocated_mask.load(std::memory_order_acquire), 0U);
+
+    // A raw pair smuggled into the typed wrappers is refused without being consumed.
+    cpromise_t raw_p{};
+    cfuture_t raw_f{};
+    ASSERT_TRUE(cfuture_create(&small_pool, &raw_p, &raw_f));
+    Motor_future_t smuggled{raw_f.slot_id, raw_f.pool, raw_f.generation};
+    MotorTelemetry rx{};
+    int32_t status = 0;
+    EXPECT_FALSE(Motor_future_wait(&smuggled, 0, &rx, &status));
+    EXPECT_EQ(status, CFUTURE_ERR_INVALID);
+    EXPECT_NE(smuggled.pool, nullptr);
+
+    EXPECT_TRUE(cfuture_cancel(&raw_p, &raw_f));
+    cfuture_pool_destroy(&small_pool);
+}

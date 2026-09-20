@@ -35,6 +35,12 @@
 #define CFUTURE_PRODUCER_SIDE (CFUTURE_HOLD_PRODUCER | CFUTURE_CLAIM_RESOLVING)
 #define CFUTURE_CONSUMER_SIDE (CFUTURE_HOLD_CONSUMER | CFUTURE_CLAIM_WAITING)
 
+/* Without a real PAL clock the backend's timeout is the only time base. A stale signal
+ * makes that wait return early, so it is re-issued, but only this many times: a latching
+ * backend that cannot be reset would otherwise spin. After that the wait falls back to
+ * polling, which the call-counting PAL clock is guaranteed to terminate. */
+#define CFUTURE_STALE_SIGNAL_MAX ((uint32_t)2U)
+
 /* While one side claims, the other side can change owner at most twice (its own
  * claim, then its release), so a third strong-CAS attempt always decides. */
 #define CFUTURE_CLAIM_MAX_ATTEMPTS ((uint32_t)3U)
@@ -202,16 +208,19 @@ static uint8_t cfuture_pool_claim_slot(cfuture_pool_t *pool)
 static inline void cfuture_notify_consumer(cfuture_pool_t *pool, cfuture_slot_t *slot,
                                            bool from_isr)
 {
-    if (pool->sync_ops.event_set && slot->event_handle)
+    if (!slot->event_handle)
     {
-        if (from_isr && pool->sync_ops.event_set_from_isr)
-        {
-            pool->sync_ops.event_set_from_isr(slot->event_handle);
-        }
-        else
-        {
-            pool->sync_ops.event_set(slot->event_handle);
-        }
+        return;
+    }
+
+    /* Guard the function actually called: an ISR-only backend may leave event_set NULL. */
+    if (from_isr && pool->sync_ops.event_set_from_isr)
+    {
+        pool->sync_ops.event_set_from_isr(slot->event_handle);
+    }
+    else if (pool->sync_ops.event_set)
+    {
+        pool->sync_ops.event_set(slot->event_handle);
     }
 }
 
@@ -535,18 +544,45 @@ bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
 
     if (st == (uint_fast32_t)CFUTURE_STATE_PENDING)
     {
-        /* Only the slot state and the PAL clock decide when the wait is over. An OSAL
-         * wait may return early without a signal (spurious condvar wakeup, RTOS wait
-         * error, adapter that caps long waits), so its result is only a wakeup hint.
-         * Expiry is strict (elapsed > timeout) because the millisecond clock truncates:
-         * a wait may overshoot by one tick but never fires early. */
-        const bool use_event = pool->sync_ops.event_wait && slot->event_handle;
+        /* With a real PAL clock, only the slot state and that clock decide when the wait
+         * is over. An OSAL wait may return early without a signal (spurious condvar wakeup,
+         * RTOS wait error, adapter that caps long waits), so its result is only a wakeup
+         * hint. Expiry is strict (elapsed > timeout) because the millisecond clock
+         * truncates: a wait overshoots by at least one tick but never fires early.
+         *
+         * Without a real clock (Cortex-M with no tick linked: the PAL only counts calls)
+         * the clock cannot time a blocking wait, and re-issuing waits against it would
+         * multiply the timeout. The backend's own timeout is then the time base. */
+        bool use_event = pool->sync_ops.event_wait && slot->event_handle;
+        const bool backend_is_time_base = use_event && !cfuture_pal_clock_is_real();
+        uint32_t stale_signals = 0U;
         const uint32_t start_ms = cfuture_pal_time_ms();
         uint32_t remaining_ms = timeout_ms;
 
         while (timeout_ms != 0U && atomic_load_explicit(&slot->state, memory_order_acquire) ==
                                        (uint_fast32_t)CFUTURE_STATE_PENDING)
         {
+            if (backend_is_time_base && use_event)
+            {
+                if (!pool->sync_ops.event_wait(slot->event_handle, timeout_ms))
+                {
+                    break; /* The backend reports its timeout elapsed. */
+                }
+
+                if (atomic_load_explicit(&slot->state, memory_order_acquire) ==
+                    (uint_fast32_t)CFUTURE_STATE_PENDING)
+                {
+                    if (pool->sync_ops.event_reset)
+                    {
+                        pool->sync_ops.event_reset(slot->event_handle);
+                    }
+
+                    ++stale_signals;
+                    use_event = (stale_signals <= CFUTURE_STALE_SIGNAL_MAX);
+                }
+                continue;
+            }
+
             if (timeout_ms != UINT32_MAX)
             {
                 uint32_t elapsed_ms = cfuture_pal_time_ms() - start_ms;
@@ -610,10 +646,11 @@ bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
         return cfuture_consume_result(pool, slot_id, st, out_payload, out_status);
     }
 
+    /* Defensive only: TIMEOUT and ABANDONED are written solely under the consumer claim
+     * this call holds, so no other state can be observed here. */
     if (out_status)
     {
-        *out_status = (st == (uint_fast32_t)CFUTURE_STATE_TIMEOUT) ? CFUTURE_ERR_TIMEOUT
-                                                                   : CFUTURE_ERR_ABANDONED;
+        *out_status = CFUTURE_ERR_INVALID;
     }
 
     cfuture_slot_release_side(pool, slot_id, CFUTURE_CONSUMER_SIDE);
