@@ -5,7 +5,7 @@
 [![Language: C11](https://img.shields.io/badge/Language-C11%20(ISO%2FIEC%209899%3A2011)-00599C.svg)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
 [![Dynamic Allocations: 0 Bytes](https://img.shields.io/badge/Dynamic%20Allocations-0%20Bytes%20(Zero--Heap)-brightgreen.svg)]()
 [![Concurrency: Lock--Free](https://img.shields.io/badge/Concurrency-Lock--Free%20Bitmask%20CAS-blueviolet.svg)]()
-[![Code Coverage: 97.8%](https://img.shields.io/badge/Line%20Coverage-97.8%25-brightgreen.svg)]()
+[![Code Coverage: 97.9%](https://img.shields.io/badge/Line%20Coverage-97.9%25-brightgreen.svg)]()
 [![ThreadSanitizer Clean](https://img.shields.io/badge/ThreadSanitizer-Verified%20(100k%20Cycles)-success.svg)]()
 [![ASan & UBSan Clean](https://img.shields.io/badge/Sanitizers-ASan%20%7C%20UBSan%20Clean-success.svg)]()
 [![ROM Footprint: < 6 KB](https://img.shields.io/badge/ROM%20Footprint-%3C%206%20KB%20(5617%20Bytes)-orange.svg)]()
@@ -225,6 +225,8 @@ Handles are plain structs and get copied (into queue messages, retry paths, ISR 
 
 - **Generation tag**: the `owner` word is `(generation << CFUTURE_GEN_SHIFT) | hold bits`. Every recycle bumps the generation (wrapping at `CFUTURE_GEN_MASK` and skipping 0, which is never valid). `cfuture_t` / `cpromise_t` carry the generation they were created with.
 - **Exclusive claim**: before touching a slot, `cpromise_set_value()` / `cpromise_drop()` claim the producer side and `cfuture_wait_for()` / `cfuture_abandon()` claim the consumer side with a single bounded CAS on `owner`. That one CAS verifies the generation, verifies the side's hold bit is still present, and sets the side's claim bit.
+- **Restart safety**: every `cfuture_pool_init()` starts its slots from a different generation, so a handle that survived a destroy + re-init of the same buffers (a subsystem restart with a request still queued) does not match the pool's new life.
+- **Limit**: the tag is 28 bits. A handle kept across exactly $2^{28}$ recycles of its own slot would match again; discard handles once they are spent instead of storing them.
 - **Effect**: a stale handle (slot already recycled, possibly reallocated), a forged handle to an unallocated slot, or the second of two concurrent calls on copies of the same handle all fail the claim and become no-ops (`cfuture_wait_for()` reports `CFUTURE_ERR_INVALID`). They cannot write the payload arena, signal the event, complete the slot's next occupant, or double-release a hold.
 
 ---
@@ -539,7 +541,7 @@ Blocks the calling task until the promise is resolved, dropped, or the timeout e
 - `out_status`: Receives integer status code (`0` = `CFUTURE_OK`, or an error code like `CFUTURE_ERR_TIMEOUT`, `CFUTURE_ERR_DROPPED`, `CFUTURE_ERR_ABANDONED`) (optional, can be `NULL`).
 - **Returns**: `true` if completed successfully; `false` on timeout, worker abort, or abandonment.
 - **Lifecycle Effect**: Releases the consumer reference ($2 \to 1$ or $1 \to 0$).
-- **Timeout guarantee**: the wait is decided only by the slot state and `cfuture_pal_time_ms()`. The OSAL `event_wait` result is treated as a wakeup hint, so spurious wakeups, failing waits, or adapters that cap long waits can never produce a false `CFUTURE_ERR_TIMEOUT`. A finite timeout never fires early (it may overshoot by one clock tick); `UINT32_MAX` really waits forever.
+- **Timeout guarantee**: the wait is decided only by the slot state and `cfuture_pal_time_ms()`. The OSAL `event_wait` result is treated as a wakeup hint, so spurious wakeups, failing waits, or adapters that cap long waits can never produce a false `CFUTURE_ERR_TIMEOUT`. A finite timeout never fires early (it may overshoot by one clock tick); `UINT32_MAX` really waits forever. Because the deadline is timed by the PAL clock even in OSAL event mode, that clock must be real: on Cortex-M link `HAL_GetTick()` or override `cfuture_pal_time_ms()` (the built-in fallback only counts calls). A stale signal on a latching (manual-reset) backend is cleared via `event_reset` rather than spun on.
 
 ```c
 void cfuture_abandon(cfuture_t *future);
@@ -565,7 +567,7 @@ void cpromise_set_value(cpromise_t *promise, const void *payload, int32_t status
 void cpromise_set_value_from_isr(cpromise_t *promise, const void *payload, int32_t status_code);
 ```
 Fulfills the promise with a payload and status code.
-- If slot is `CFUTURE_STATE_PENDING`: Copies `payload` into slot arena, transitions state to `CFUTURE_STATE_COMPLETED`, signals OS event, and releases producer reference.
+- If slot is `CFUTURE_STATE_PENDING`: Copies `payload` into slot arena (a `NULL` payload delivers a zero-filled one, never the slot's previous contents), transitions state to `CFUTURE_STATE_COMPLETED`, signals OS event, and releases producer reference.
 - If slot is `CFUTURE_STATE_TIMEOUT` or `CFUTURE_STATE_ABANDONED`: **Discards copy**, skips event signal, and drops final producer reference ($1 \to 0$), safely recycling the slot.
 - **`_from_isr` variant**: Reentrant and safe to call from hardware interrupt service routines without blocking. **Note on OSAL contract**: When using an OSAL synchronization adapter table (`cfuture_sync_ops_t`), `event_set_from_isr` must be populated with an interrupt-safe OS kernel API (e.g. `xEventGroupSetBitsFromISR` on FreeRTOS or `tx_event_flags_set` on ThreadX). If `event_set_from_isr` is `NULL`, `cfuture` falls back to `event_set`, which is only safe if the underlying adapter's `event_set` is safe to call from an ISR (such as in atomic polling mode).
 
@@ -900,20 +902,20 @@ Each side pays one extra CAS per transaction for its generation-checked claim; t
 
 ### GoogleTest Test Suite Matrix
 
-The test harness comprises 10 dedicated suites. Everything except the time-boxed chaos run finishes in under a second; `test_stress_chaos` runs 1.5 s per sync mode by default (set `CFUTURE_STRESS_MS` for longer soaks):
+The test harness comprises 10 dedicated suites. Everything except the time-boxed chaos run finishes in under a second; `test_stress_chaos` runs 1.5 s for each of its three sync modes by default (set `CFUTURE_STRESS_MS` for longer soaks):
 
 | Test Suite | Binary Target | Coverage Focus |
 | :--- | :--- | :--- |
 | **`test_pool_init`** | `build/tests/test_pool_init` | Capacity validation, parameter boundary checking, static arena alignment. |
-| **`test_lifecycle`** | `build/tests/test_lifecycle` | Valid state transitions, payload fidelity, immediate drop cleanup. |
+| **`test_lifecycle`** | `build/tests/test_lifecycle` | Valid state transitions, payload fidelity, immediate drop cleanup, no payload carry-over between occupants. |
 | **`test_timeouts`** | `build/tests/test_timeouts` | Deadline expiration, timeout state pinning, consumer unwinding, spurious / failing OSAL waits. |
 | **`test_isr_safety`** | `build/tests/test_isr_safety` | Reentrant completion, zero-context fulfillment, ISR event flags. |
 | **`test_typed_pool`** | `build/tests/test_typed_pool` | Type-safe macro wrappers, multi-pool isolation, compiler strictness. |
 | **`test_concurrency_stress`** | `build/tests/test_concurrency_stress` | High-frequency multi-threaded race conditions (100k cycles), duplicate-producer race, stale-handle hammer. |
 | **`test_error_injection`** | `build/tests/test_error_injection` | Mock sync failure, OS event creation failure, CAS saturation rollback. |
-| **`test_generation`** | `build/tests/test_generation` | Stale, duplicated and forged handles, generation wrap, `cfuture_cancel()`. |
+| **`test_generation`** | `build/tests/test_generation` | Stale, duplicated and forged handles, generation wrap, pool re-init, `cfuture_cancel()`. |
 | **`test_posix_adapter`** | `build/tests/test_posix_adapter` | POSIX event latch/reset/timeout semantics, lost-wakeup ping-pong. |
-| **`test_stress_chaos`** | `build/tests/test_stress_chaos` | Randomised multi-threaded scenarios (timeouts, abandons, drops, duplicates, cancels, stale replays) in event and polling modes. |
+| **`test_stress_chaos`** | `build/tests/test_stress_chaos` | Randomised multi-threaded scenarios (timeouts, abandons, drops, duplicates, cancels, stale replays) in event, polling and hostile-OSAL modes (waits that return early, fake signals, no `event_reset`). |
 
 ---
 
