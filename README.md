@@ -208,11 +208,12 @@ There is no counter: a slot is owned while either bit is set, and whichever side
 graph TD
     INIT[Slot Allocated in Pool] -->|cfuture_create| RC2[Both Holds Set<br/>Consumer + Producer]
     
-    RC2 -->|Consumer Times Out / Drops First| RC1_CONS[Producer Hold Only<br/>Slot Locked: Unclaimable by Other Tasks]
+    RC2 -->|Consumer Times Out / Abandons First| RC1_CONS[Producer Hold Only<br/>Slot Locked: Unclaimable by Other Tasks]
     RC2 -->|Producer Fulfills / Drops First| RC1_PROD[Consumer Hold Only<br/>Slot Locked: Unclaimable by Other Tasks]
     
     RC1_CONS -->|Producer Later Releases Last Hold| RC0[No Holds Left<br/>Slot Safely Recycled into Bitmask]
     RC1_PROD -->|Consumer Reads & Releases Last Hold| RC0
+    RC2 -->|cfuture_cancel on an Undispatched Pair| RC0
 ```
 
 #### Why This Eliminates the Queue ABA Hazard
@@ -388,14 +389,14 @@ sequenceDiagram
     A->>P: cfuture_create(&pool, &promise, &future)
     Note over P: Claims Slot 0<br/>State = PENDING<br/>Holds: consumer + producer
     A->>Q: os_queue_send(&cmd_with_promise)
-    A->>P: cfuture_wait_for(&future, 100ms, &result)
+    A->>P: cfuture_wait_for(&future, 100, &result, &status)
     Note over A: Blocks on OS sync event
     Q->>S: os_queue_receive(&cmd)
     S->>S: Execute peripheral operation (e.g. Flash read)
     S->>P: cpromise_set_value(&promise, &data, 0)
     Note over P: Copies data to slot arena<br/>State -> COMPLETED<br/>Signals OS event<br/>Releases producer hold
     P-->>A: OS Event Unblocks T_A
-    Note over A: Reads payload copy from slot<br/>Releases consumer hold (last)<br/>Recycles Slot 0 into bitmask
+    Note over A: Reads payload copy from slot<br/>Releases consumer hold<br/>Slot 0 recycled once both holds are gone
     A->>A: Continues with valid result
 ```
 
@@ -416,7 +417,7 @@ sequenceDiagram
 
     A->>P: cfuture_create(&pool, &promise_A, &future_A) -> Claims Slot 0
     A->>Q: os_queue_send(&cmd_A)
-    A->>P: cfuture_wait_for(&future_A, 25ms, &result)
+    A->>P: cfuture_wait_for(&future_A, 25, &result, &status)
     Note over S: Servicer delayed by high-priority work...
     Note over A: 25ms Deadline Expires!<br/>CAS: PENDING -> TIMEOUT<br/>Releases consumer hold<br/>Returns false to caller!
     Note over A: T_A unwinds its call stack safely.
@@ -445,7 +446,7 @@ sequenceDiagram
 
     A->>P: cfuture_create() -> Slot 3 (both holds)
     A->>S: Dispatches hardware request
-    A->>P: cfuture_wait_for(timeout=30ms)
+    A->>P: cfuture_wait_for(&future, 30, &result, &status)
     S->>S: Servicer begins 50ms Flash Sector Erase...
     Note over A: 30ms expires: TIMEOUT!<br/>Releases consumer hold<br/>T_A exits function!
     Note over S: 50ms: Flash Erase completes!
@@ -469,14 +470,14 @@ sequenceDiagram
 
     App->>P: cfuture_create() -> Slot 1
     App->>App: Configures Peripheral DMA buffer
-    App->>P: cfuture_wait_for(timeout=100ms)
+    App->>P: cfuture_wait_for(&future, 100, &result, &status)
     Note over App: Task blocks on OS event
     Note over ISR: DMA Transfer Complete Interrupt Fires!
     ISR->>P: cpromise_set_value_from_isr(&promise, &dma_status, 0)
     Note over P: Lock-free atomic state -> COMPLETED<br/>Calls event_set_from_isr()<br/>Releases producer hold
     ISR-->>App: Scheduler yields to waiting Task
     P-->>App: Unblocks with completed status
-    Note over App: Releases consumer hold (last)<br/>Slot 1 recycled
+    Note over App: Releases consumer hold<br/>Slot 1 recycled once both holds are gone
 ```
 
 ---
@@ -686,6 +687,13 @@ typedef struct
 CFUTURE_DEFINE_STATIC_BUFFERS(s_storage, storage_response_t, STORAGE_QUEUE_CAPACITY);
 static cfuture_pool_t s_storage_pool;
 
+// Call once, before any task uses the pool
+bool storage_pool_setup(void)
+{
+    return cfuture_pool_init(&s_storage_pool, STORAGE_QUEUE_CAPACITY, sizeof(storage_response_t),
+                             s_storage_slots, s_storage_payload, cfuture_posix_sync_ops());
+}
+
 // --- Shared Storage Servicer Task (T_S) ---
 void storage_servicer_task_loop(void *queue_handle)
 {
@@ -752,10 +760,10 @@ bool save_audio_sample_safe(uint32_t sector, const uint8_t *data, uint32_t timeo
         return (status_code == CFUTURE_OK);
     }
 
-    // TIMEOUT OR CANCELLATION:
-    // T_A safely returns and unwinds its call stack immediately!
-    // The slot remains locked (producer hold) until T_S dequeues the promise.
-    // ZERO dangling stack pointers, ZERO Queue ABA collisions.
+    // TIMEOUT (status_code == CFUTURE_ERR_TIMEOUT) OR WORKER DROP (the worker's code):
+    // T_A returns and unwinds its call stack at once.
+    // After a timeout the slot stays allocated (producer hold) until T_S resolves the
+    // promise, so T_S cannot write into a reused slot. After a drop it is already free.
     return false;
 }
 ```
@@ -880,7 +888,7 @@ ARMv6-M (Cortex-M0/M0+) has no LDREX/STREX, so the compiler cannot inline the li
 Host object sizes, release build inside the Nix dev shell (`clang 21.1.8 -O3 -DNDEBUG`, x86-64). This table is what `build.py --docs` checks; x86-64 is not a ROM target, so treat it as a regression reference only:
 
 ```text
---- Binary Footprint (size libcfuture.a) ---
+--- Binary Footprint (size) ---
    text    data     bss     dec     hex filename
    4304       0       8    4312    10d8 cfuture.c.o
     266       0       0     266     10a cfuture_pal.c.o
@@ -967,6 +975,7 @@ python3 build.py --all
 
 | Flag | Purpose |
 | :--- | :--- |
+| `python3 build.py --all` | Runs the whole pipeline: clean, build, test, tsan, asan, stats, lint, docs, bench. |
 | `python3 build.py --build` | Configures and builds Release library in `build/`. |
 | `python3 build.py --test` | Executes full 11-suite CTest verification suite. |
 | `python3 build.py --tsan` | Builds the suite with ThreadSanitizer in `build_tsan/` and runs it. |
@@ -982,7 +991,7 @@ python3 build.py --all
 
 ### Hermetic Nix Development Environment
 
-The project is meant to be built inside the reproducible environment defined by `flake.nix` (Clang, CMake, Ninja, GoogleTest, cppcheck, clang-format, lcov, valgrind). The footprint, coverage and benchmark figures in this document were measured there:
+The project is meant to be built inside the reproducible environment defined by `flake.nix` (Clang, CMake, GoogleTest, cppcheck, clang-format, lcov, valgrind; Ninja is available, though `build.py` uses CMake's default generator). The footprint, coverage and benchmark figures in this document were measured there:
 
 ```bash
 # Enter the hermetic shell:
@@ -1001,6 +1010,8 @@ nix develop -c python3 build.py --all
 ├── CMakeLists.txt                # Root CMake build configuration
 ├── build.py                      # Unified cross-platform build & test driver
 ├── flake.nix                     # Hermetic Nix flake environment definition
+├── flake.lock                    # Pinned flake inputs
+├── .gitignore
 ├── .clang-format                 # Allman / 4-space style enforced by --lint
 ├── LICENSE                       # MIT license
 ├── include/
@@ -1019,6 +1030,7 @@ nix develop -c python3 build.py --all
 │       ├── cfuture_win32.c       # Win32 synchronization implementation
 │       └── cfuture_polling.c     # Polling synchronization implementation
 ├── tests/
+│   ├── CMakeLists.txt            # One GoogleTest binary per test_*.cpp
 │   ├── mock_sync_ops.hpp         # Mock synchronization provider for unit testing
 │   ├── test_pool_init.cpp        # Static pool initialization & capacity tests
 │   ├── test_lifecycle.cpp        # State transitions & payload transfer tests
@@ -1032,8 +1044,10 @@ nix develop -c python3 build.py --all
 │   ├── test_pal_fallback.cpp     # Waits when the PAL has no real clock
 │   └── test_stress_chaos.cpp     # Randomised multi-threaded chaos test
 ├── benchmarks/
-│   └── bench_throughput.cpp      # Latency & throughput micro-benchmarking
+│   ├── CMakeLists.txt
+│   └── bench_throughput.cpp      # Call-overhead micro-benchmark (POSIX and polling modes)
 ├── examples/
+│   ├── CMakeLists.txt
 │   └── sensor_pipeline.c         # End-to-end multi-task sensor showcase
 ├── STM32F407_MULTI_OS_PLAN.md    # Master architecture plan for companion hardware repo
 └── README.md                     # Technical architecture documentation

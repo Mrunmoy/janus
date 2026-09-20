@@ -18,7 +18,7 @@ Instead of managing multiple git branches, this repository uses a **unified sing
 ```
 stm32f407/
 ├── CMakeLists.txt              # Root build orchestrator (selects OSAL/PAL via -DTARGET_OS=...)
-├── build.py                    # Unified CLI script (--target {host,freertos,threadx,zephyr}, --build, --flash, --stats, --clean)
+├── build.py                    # Unified CLI script (--os {host,freertos,threadx,zephyr}, --build, --flash, --stats, --clean)
 ├── README.md                   # Hardware setup, wiring, flashing, and quickstart guide
 ├── external/
 │   └── cfuture/                # Git submodule / vendored libcfuture C11 core library
@@ -155,7 +155,7 @@ def main():
 ### Phase 3: FreeRTOS + STM32 USB Host Target (`freertos`)
 - **Task 3.1**: Add FreeRTOS kernel under `third_party/freertos/` and STM32 HAL under `third_party/stm32f4_hal/`.
 - **Task 3.2**: Implement `app/src/osal/osal_freertos.c`:
-  - `cfuture_sync_ops_t` backed by FreeRTOS `EventGroupHandle_t` (`xEventGroupCreate`, `xEventGroupSetBits`, `xEventGroupWaitBits`).
+  - `cfuture_sync_ops_t` backed by FreeRTOS `EventGroupHandle_t` (`xEventGroupCreate`, `xEventGroupSetBits`, `xEventGroupWaitBits`), with `event_set_from_isr` mapped to `xEventGroupSetBitsFromISR` so promises can be fulfilled from interrupt context.
   - Queue backed by FreeRTOS `QueueHandle_t`.
 - **Task 3.3**: Implement `app/src/pal/pal_stm32f4_usb.c`:
   - Configure STM32 USB OTG FS Host stack (`usbh_core.c`, `usbh_msc.c`).

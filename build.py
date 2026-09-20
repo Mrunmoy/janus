@@ -312,7 +312,7 @@ def main():
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Run full quality pipeline (clean, build, test, tsan, asan, stats, lint, bench)",
+        help="Run full quality pipeline (clean, build, test, tsan, asan, stats, lint, docs, bench)",
     )
 
     args = parser.parse_args()
