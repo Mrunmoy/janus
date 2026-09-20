@@ -24,10 +24,12 @@ extern "C"
     /**
      * @brief Reads the monotonic hardware clock in milliseconds.
      *
-     * Used for bare-metal polling timeout calculation without an RTOS timer.
+     * Times every cfuture_wait_for() deadline, in polling mode and when an OSAL event
+     * backend is injected (the backend's wait result is only a wakeup hint).
      * Default implementations provide POSIX clock_gettime() or Win32 GetTickCount64().
      * On ARM Cortex-M, weakly calls HAL_GetTick() if linked, or advances a monotonic
-     * fallback counter to guarantee bounded timeout termination if unlinked.
+     * fallback counter to guarantee bounded timeout termination if unlinked. That
+     * fallback counts calls, not milliseconds: timeouts still end, but are not accurate.
      * Embedded targets can override this weak function with their own hardware timer.
      *
      * @return Monotonic elapsed time in milliseconds.

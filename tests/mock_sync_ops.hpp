@@ -49,6 +49,7 @@ class MockSyncController
         force_create_failure.store(false, std::memory_order_relaxed);
         spurious_wakeups.store(false, std::memory_order_relaxed);
         fail_wait.store(false, std::memory_order_relaxed);
+        last_wait_timeout_ms.store(0, std::memory_order_relaxed);
 
         for (size_t i = 0; i < kMaxEvents; ++i)
         {
@@ -115,6 +116,7 @@ class MockSyncController
         }
 
         MockSyncController &self = instance();
+        self.last_wait_timeout_ms.store(timeout_ms, std::memory_order_relaxed);
         if (self.fail_wait.load(std::memory_order_relaxed))
         {
             return false;
@@ -194,6 +196,7 @@ class MockSyncController
     std::atomic<bool> force_create_failure{false};
     std::atomic<bool> spurious_wakeups{false};
     std::atomic<bool> fail_wait{false};
+    std::atomic<uint32_t> last_wait_timeout_ms{0};
 
     MockEvent events[kMaxEvents];
 

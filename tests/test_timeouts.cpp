@@ -212,3 +212,50 @@ TEST_F(TimeoutsTest, FailingEventWait_FiniteWaitStillReceivesLateValue)
     EXPECT_TRUE(ok);
     EXPECT_EQ(out_val, 99U);
 }
+
+TEST_F(TimeoutsTest, StaleLatchedSignal_IsClearedInsteadOfHotSpinning)
+{
+    cpromise_t promise{};
+    cfuture_t future{};
+    ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
+
+    // Manual-reset style backends keep reporting "signaled" until someone resets them.
+    auto &mock = cfuture::testing::MockSyncController::instance();
+    mock.getSyncOps().event_set(pool.slots[0].event_handle);
+
+    int32_t err = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    EXPECT_FALSE(cfuture_wait_for(&future, 50, nullptr, &err));
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+
+    EXPECT_EQ(err, CFUTURE_ERR_TIMEOUT);
+    EXPECT_GE(elapsed_ms, 50);
+    EXPECT_LE(mock.events[0].wait_count, 4U);
+
+    cpromise_drop(&promise, CFUTURE_ERR_DROPPED);
+}
+
+TEST_F(TimeoutsTest, LargestFiniteTimeout_IsNeverHandedToTheBackendAsForever)
+{
+    cpromise_t promise{};
+    cfuture_t future{};
+    ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
+
+    std::thread producer(
+        [&promise]()
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            uint32_t value = 5U;
+            cpromise_set_value(&promise, &value, 0);
+        });
+
+    uint32_t out_val = 0;
+    EXPECT_TRUE(cfuture_wait_for(&future, UINT32_MAX - 1U, &out_val, nullptr));
+    producer.join();
+
+    EXPECT_EQ(out_val, 5U);
+    EXPECT_NE(cfuture::testing::MockSyncController::instance().last_wait_timeout_ms.load(),
+              UINT32_MAX);
+}

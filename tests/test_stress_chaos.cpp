@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <functional>
 #include <gtest/gtest.h>
 #include <mutex>
 #include <string>
@@ -161,7 +162,43 @@ enum class SyncMode
 {
     kPosixEvents,
     kPolling,
+    kHostileEvents,
 };
+
+// A legal-but-nasty OSAL: waits return early without a signal, report signals that
+// never happened, or cut the requested timeout short, and there is no event_reset.
+// The core may only trust slot state and the PAL clock, so every invariant must hold.
+bool hostileEventWait(void *handle, uint32_t timeout_ms)
+{
+    thread_local Rng rng{0xC0FFEE11U ^
+                         (uint32_t)std::hash<std::thread::id>{}(std::this_thread::get_id())};
+    const uint32_t roll = rng.below(16);
+    if (roll < 4U)
+    {
+        return false;
+    }
+    if (roll < 6U)
+    {
+        return true;
+    }
+    if (roll < 10U && timeout_ms > 1U && timeout_ms != UINT32_MAX)
+    {
+        timeout_ms = 1U + rng.below(timeout_ms);
+    }
+    return cfuture_posix_sync_ops()->event_wait(handle, timeout_ms);
+}
+
+const cfuture_sync_ops_t *hostileSyncOps()
+{
+    static cfuture_sync_ops_t ops = []
+    {
+        cfuture_sync_ops_t o = *cfuture_posix_sync_ops();
+        o.event_wait = &hostileEventWait;
+        o.event_reset = nullptr;
+        return o;
+    }();
+    return &ops;
+}
 
 uint32_t stressDurationMs()
 {
@@ -191,8 +228,15 @@ class ChaosStressTest : public ::testing::TestWithParam<SyncMode>
 
     void SetUp() override
     {
-        const cfuture_sync_ops_t *ops =
-            (GetParam() == SyncMode::kPosixEvents) ? cfuture_posix_sync_ops() : nullptr;
+        const cfuture_sync_ops_t *ops = nullptr;
+        if (GetParam() == SyncMode::kPosixEvents)
+        {
+            ops = cfuture_posix_sync_ops();
+        }
+        else if (GetParam() == SyncMode::kHostileEvents)
+        {
+            ops = hostileSyncOps();
+        }
         ASSERT_TRUE(cfuture_pool_init(&m_pool, kCapacity, sizeof(Payload), m_slots, m_arena, ops));
 
         // Park every slot just below the generation limit so the run crosses the wrap.
@@ -583,9 +627,17 @@ TEST_P(ChaosStressTest, RandomisedScenariosHoldEveryInvariant)
 }
 
 INSTANTIATE_TEST_SUITE_P(SyncModes, ChaosStressTest,
-                         ::testing::Values(SyncMode::kPosixEvents, SyncMode::kPolling),
+                         ::testing::Values(SyncMode::kPosixEvents, SyncMode::kPolling,
+                                           SyncMode::kHostileEvents),
                          [](const ::testing::TestParamInfo<SyncMode> &info)
                          {
-                             return info.param == SyncMode::kPosixEvents ? "PosixEvents"
-                                                                         : "Polling";
+                             switch (info.param)
+                             {
+                             case SyncMode::kPosixEvents:
+                                 return "PosixEvents";
+                             case SyncMode::kPolling:
+                                 return "Polling";
+                             default:
+                                 return "HostileEvents";
+                             }
                          });

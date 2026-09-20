@@ -221,6 +221,32 @@ TEST_F(GenerationTest, ForgedHandleToUnallocatedSlotIsRejected)
     cycleOnce(21U);
 }
 
+TEST_F(GenerationTest, ReinitialisedPool_RejectsHandlesFromItsPreviousLife)
+{
+    cpromise_t promise{};
+    cfuture_t future{};
+    ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
+    cpromise_t survivor = promise; // e.g. still sitting in a worker queue across a restart
+    ASSERT_TRUE(cfuture_cancel(&promise, &future));
+
+    cfuture_pool_destroy(&pool);
+    cfuture_sync_ops_t sync_ops = cfuture::testing::MockSyncController::instance().getSyncOps();
+    ASSERT_TRUE(cfuture_pool_init(&pool, kCapacity, kPayloadSize, slots, payload_arena, &sync_ops));
+
+    cpromise_t next_p{};
+    cfuture_t next_f{};
+    ASSERT_TRUE(cfuture_create(&pool, &next_p, &next_f));
+    ASSERT_EQ(next_p.slot_id, survivor.slot_id);
+
+    EXPECT_FALSE(cpromise_is_active(&survivor));
+    uint32_t poison = 0xBADBADU;
+    cpromise_set_value(&survivor, &poison, 0);
+    EXPECT_EQ(pool.slots[0].state.load(std::memory_order_acquire),
+              (uint_fast32_t)CFUTURE_STATE_PENDING);
+
+    EXPECT_TRUE(cfuture_cancel(&next_p, &next_f));
+}
+
 // ── cfuture_cancel ──────────────────────────────────────────────────────────
 
 TEST_F(GenerationTest, CancelReleasesUndispatchedPair)

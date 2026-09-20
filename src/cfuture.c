@@ -124,6 +124,23 @@ static bool cfuture_slot_try_claim(cfuture_pool_t *pool, uint8_t slot_id, uint32
 
 #define CFUTURE_CAS_MAX_RETRIES ((uint32_t)1000U)
 
+/* Counts cfuture_pool_init() calls so every pool life starts from a different
+ * generation: a handle that survived destroy + re-init of the same buffers (e.g. a
+ * subsystem restart with a request still queued) must not match the new life's slots. */
+static cfuture_atomic_uint_fast32_t s_pool_epoch;
+
+/**
+ * @brief Picks the starting slot generation for a freshly initialized pool.
+ *
+ * @return A generation in 1..CFUTURE_GEN_MASK, spread across the range per init call.
+ */
+static uint_fast32_t cfuture_pool_next_start_generation(void)
+{
+    uint_fast32_t epoch = atomic_fetch_add_explicit(&s_pool_epoch, 1U, memory_order_relaxed);
+    uint_fast32_t start = (uint_fast32_t)(((uint32_t)epoch * 2654435761U) & CFUTURE_GEN_MASK);
+    return (start == 0U) ? 1U : start;
+}
+
 #if defined(_MSC_VER)
 #include <intrin.h>
 static inline int cfuture_ctz32(uint32_t mask)
@@ -234,9 +251,18 @@ static void cpromise_resolve_impl(cpromise_t *promise, const void *payload, int3
     if (atomic_load_explicit(&slot->state, memory_order_acquire) ==
         (uint_fast32_t)CFUTURE_STATE_PENDING)
     {
-        if (payload && pool->payload_size > 0U && slot->payload)
+        if (pool->payload_size > 0U && slot->payload)
         {
-            memcpy(slot->payload, payload, pool->payload_size);
+            if (payload)
+            {
+                memcpy(slot->payload, payload, pool->payload_size);
+            }
+            else if (target_state == CFUTURE_STATE_COMPLETED)
+            {
+                /* The consumer copies the arena out on COMPLETED; never hand it the
+                 * previous occupant's bytes. */
+                memset(slot->payload, 0, pool->payload_size);
+            }
         }
 
         slot->status_code = status_code;
@@ -324,9 +350,11 @@ bool cfuture_pool_init(cfuture_pool_t *pool, uint32_t capacity, size_t payload_s
         memset(&pool->sync_ops, 0, sizeof(pool->sync_ops));
     }
 
+    uint_fast32_t start_generation = cfuture_pool_next_start_generation();
+
     for (uint32_t i = 0; i < capacity; ++i)
     {
-        atomic_store_explicit(&slots_buf[i].owner, (uint_fast32_t)1U << CFUTURE_GEN_SHIFT,
+        atomic_store_explicit(&slots_buf[i].owner, start_generation << CFUTURE_GEN_SHIFT,
                               memory_order_relaxed);
         atomic_store_explicit(&slots_buf[i].state, (uint_fast32_t)CFUTURE_STATE_IDLE,
                               memory_order_relaxed);
@@ -525,12 +553,30 @@ bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
                 {
                     break;
                 }
+                /* +1 covers the truncated tick, but must never grow into UINT32_MAX,
+                 * which backends read as "forever". */
                 remaining_ms = (timeout_ms - elapsed_ms) + 1U;
+                if (remaining_ms == UINT32_MAX)
+                {
+                    remaining_ms = UINT32_MAX - 1U;
+                }
             }
 
             if (!use_event || !pool->sync_ops.event_wait(slot->event_handle, remaining_ms))
             {
                 /* Polling mode, or an unsignaled return: yield rather than spin hot. */
+                cfuture_pal_cpu_relax();
+            }
+            else if (atomic_load_explicit(&slot->state, memory_order_acquire) ==
+                     (uint_fast32_t)CFUTURE_STATE_PENDING)
+            {
+                /* Signaled but nothing resolved: a stale signal. Latching (manual-reset)
+                 * backends would report it forever, so clear it. A real signal racing this
+                 * reset is not lost, because the state re-check above is the truth. */
+                if (pool->sync_ops.event_reset)
+                {
+                    pool->sync_ops.event_reset(slot->event_handle);
+                }
                 cfuture_pal_cpu_relax();
             }
         }

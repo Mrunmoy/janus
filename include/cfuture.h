@@ -68,6 +68,13 @@ extern "C"
 #define CFUTURE_HOLD_PRODUCER ((uint_fast32_t)0x02U) /**< Promise side still holds the slot. */
 #define CFUTURE_HOLD_BOTH (CFUTURE_HOLD_CONSUMER | CFUTURE_HOLD_PRODUCER)
 
+/** Compile-time assertion usable from both C11 and C++ translation units. */
+#ifdef __cplusplus
+#define CFUTURE_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#else
+#define CFUTURE_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+
 /** Generation tag layout inside cfuture_slot_t::owner (generation 0 is never valid). */
 #define CFUTURE_GEN_SHIFT (4U)
 #define CFUTURE_GEN_MASK ((uint32_t)0x0FFFFFFFU)
@@ -207,6 +214,10 @@ extern "C"
      * NULL if payload_size == 0).
      * @param[in]  sync_ops     Pointer to OSAL interface table, or NULL for PAL polling mode.
      * @return true on success, false if parameters are invalid.
+     *
+     * @note Every init starts the pool's slots from a different generation, so handles
+     *       left over from before a destroy + re-init of the same buffers are rejected.
+     *       Not thread-safe against use of the same pool; call before any create.
      */
     bool cfuture_pool_init(cfuture_pool_t *pool, uint32_t capacity, size_t payload_size,
                            cfuture_slot_t *slots_buf, uint8_t *payload_buf,
@@ -238,6 +249,12 @@ extern "C"
      * @param[out]    out_status  Receives status code (0 = success) or error code (optional, can be
      * NULL).
      * @return true if completed successfully, false if timed out, dropped, or invalid.
+     *
+     * @note A stale, duplicated or already-consumed handle yields CFUTURE_ERR_INVALID.
+     *       A finite timeout never fires early (it may overshoot by one PAL clock tick).
+     *       The wait is timed with cfuture_pal_time_ms() even when an OSAL event backend
+     *       is injected, so that clock must be real: on Cortex-M link HAL_GetTick() or
+     *       override cfuture_pal_time_ms().
      */
     bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
                           int32_t *out_status);
@@ -276,7 +293,8 @@ extern "C"
      * @brief Fulfills the promise with a result value and notifies the consumer.
      *
      * @param[in,out] promise    The promise handle. Invalidated upon return.
-     * @param[in]     payload    Result data to copy into pool slot (optional if payload_size == 0).
+     * @param[in]     payload    Result data to copy into pool slot. NULL delivers a zero-filled
+     *                           payload, never the slot's previous contents.
      * @param[in]     status_code Status code (0 = success / CFUTURE_OK).
      */
     void cpromise_set_value(cpromise_t *promise, const void *payload, int32_t status_code);
@@ -293,7 +311,8 @@ extern "C"
      * @brief Fulfills the promise from an Interrupt Service Routine (ISR).
      *
      * @param[in,out] promise    The promise handle. Invalidated upon return.
-     * @param[in]     payload    Result data to copy into pool slot (optional if payload_size == 0).
+     * @param[in]     payload    Result data to copy into pool slot. NULL delivers a zero-filled
+     *                           payload, never the slot's previous contents.
      * @param[in]     status_code Status code (0 = success / CFUTURE_OK).
      */
     void cpromise_set_value_from_isr(cpromise_t *promise, const void *payload, int32_t status_code);
@@ -329,6 +348,16 @@ extern "C"
         cfuture_pool_t *pool;                                                                      \
         uint32_t generation;                                                                       \
     } subsystem_name##_promise_t;                                                                  \
+    CFUTURE_STATIC_ASSERT(                                                                         \
+        sizeof(subsystem_name##_future_t) == sizeof(cfuture_t) &&                                  \
+            offsetof(subsystem_name##_future_t, pool) == offsetof(cfuture_t, pool) &&              \
+            offsetof(subsystem_name##_future_t, generation) == offsetof(cfuture_t, generation),    \
+        "typed future handle must mirror cfuture_t");                                              \
+    CFUTURE_STATIC_ASSERT(                                                                         \
+        sizeof(subsystem_name##_promise_t) == sizeof(cpromise_t) &&                                \
+            offsetof(subsystem_name##_promise_t, pool) == offsetof(cpromise_t, pool) &&            \
+            offsetof(subsystem_name##_promise_t, generation) == offsetof(cpromise_t, generation),  \
+        "typed promise handle must mirror cpromise_t");                                            \
     static inline bool subsystem_name##_create(                                                    \
         cfuture_pool_t *pool, subsystem_name##_promise_t *p, subsystem_name##_future_t *f)         \
     {                                                                                              \
