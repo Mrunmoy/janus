@@ -242,7 +242,12 @@ int main(void)
             .promise = p1,
             .is_shutdown = false,
         };
-        cmd_queue_push(&s_cmd_queue, &cmd1);
+        if (!cmd_queue_push(&s_cmd_queue, &cmd1))
+        {
+            /* Servicer never saw the promise: hand the slot straight back to the pool. */
+            (void)cfuture_cancel(&p1, &f1);
+            printf("[Task T_A] Queue full: request cancelled before dispatch.\n");
+        }
 
         storage_result_t res1 = {0};
         int32_t err1 = 0;
@@ -296,8 +301,8 @@ int main(void)
                    "T_A's promise!\n\n",
                    slot_a);
 
-            cfuture_abandon(&f3);
-            cpromise_drop(&p3, 0);
+            /* T_B's pair was never dispatched: release both ends in one step. */
+            (void)cfuture_cancel(&p3, &f3);
         }
 
         /* Give Servicer a moment to pop T_A's request and finish late */

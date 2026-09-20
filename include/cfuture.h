@@ -11,8 +11,11 @@
  * - Zero dynamic memory allocation (0 bytes malloc/free).
  * - Compile-time static bounds: MAX_SLOTS capacity enforced via bitmask.
  * - Lock-free, non-blocking single-slot acquisition via atomic CAS on bitmask.
- * - Dual-owner reference tracking (2 -> 1 -> 0) preventing premature slot recycling
- *   while the producer is signaling the consumer event.
+ * - Dual-owner hold bits (consumer + producer) preventing premature slot recycling
+ *   while the producer is signaling the consumer event. Each side can only ever
+ *   release its own hold, so a duplicated handle cannot steal the other side's.
+ * - Generation-tagged handles: a handle that outlives its slot's recycling is
+ *   rejected instead of aliasing the slot's next occupant.
  * - Immediate non-blocking timeout unwinding: consumer marks TIMEOUT and exits
  *   instantly without spinning or blocking; deferred slot recycling is safely
  *   handled by the producer upon completion.
@@ -58,6 +61,23 @@ extern "C"
 
 /** Sentinel value representing an invalid or released slot ID. */
 #define CFUTURE_INVALID_SLOT ((uint8_t)0xFFU)
+
+/** Ownership bits in the low nibble of cfuture_slot_t::owner. */
+#define CFUTURE_HOLD_NONE ((uint_fast32_t)0x00U)     /**< Slot free / fully released. */
+#define CFUTURE_HOLD_CONSUMER ((uint_fast32_t)0x01U) /**< Future side still holds the slot. */
+#define CFUTURE_HOLD_PRODUCER ((uint_fast32_t)0x02U) /**< Promise side still holds the slot. */
+#define CFUTURE_HOLD_BOTH (CFUTURE_HOLD_CONSUMER | CFUTURE_HOLD_PRODUCER)
+
+/** Compile-time assertion usable from both C11 and C++ translation units. */
+#ifdef __cplusplus
+#define CFUTURE_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#else
+#define CFUTURE_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+
+/** Generation tag layout inside cfuture_slot_t::owner (generation 0 is never valid). */
+#define CFUTURE_GEN_SHIFT (4U)
+#define CFUTURE_GEN_MASK ((uint32_t)0x0FFFFFFFU)
 
 #if defined(__has_include)
 #if __has_include(<errno.h>)
@@ -137,11 +157,13 @@ extern "C"
      */
     typedef struct
     {
-        cfuture_atomic_uint_fast32_t ref_count; /**< Dual-owner refcount: 2 -> 1 -> 0. */
-        cfuture_atomic_uint_fast32_t state;     /**< Current state (cfuture_state_t). */
-        int32_t status_code; /**< Result status code (0 = success / CFUTURE_OK). */
-        void *event_handle;  /**< Injected OSAL synchronization handle. */
-        uint8_t *payload;    /**< Pointer into pool payload arena. */
+        /** (generation << CFUTURE_GEN_SHIFT) | hold bits. One word, so a handle's
+         *  generation check and its ownership transition are a single CAS. */
+        cfuture_atomic_uint_fast32_t owner;
+        cfuture_atomic_uint_fast32_t state; /**< Current state (cfuture_state_t). */
+        int32_t status_code;                /**< Result status code (0 = success / CFUTURE_OK). */
+        void *event_handle;                 /**< Injected OSAL synchronization handle. */
+        uint8_t *payload;                   /**< Pointer into pool payload arena. */
     } cfuture_slot_t;
 
     /* Forward declaration of pool container. */
@@ -168,6 +190,7 @@ extern "C"
     {
         uint8_t slot_id;      /**< Index into pool->slots array, or CFUTURE_INVALID_SLOT. */
         cfuture_pool_t *pool; /**< Pointer to originating pool, or NULL if consumed/invalid. */
+        uint32_t generation;  /**< Slot generation at creation; 0 if consumed/invalid. */
     } cpromise_t;
 
     /**
@@ -177,6 +200,7 @@ extern "C"
     {
         uint8_t slot_id;      /**< Index into pool->slots array, or CFUTURE_INVALID_SLOT. */
         cfuture_pool_t *pool; /**< Pointer to originating pool, or NULL if consumed/invalid. */
+        uint32_t generation;  /**< Slot generation at creation; 0 if consumed/invalid. */
     } cfuture_t;
 
     /**
@@ -190,6 +214,10 @@ extern "C"
      * NULL if payload_size == 0).
      * @param[in]  sync_ops     Pointer to OSAL interface table, or NULL for PAL polling mode.
      * @return true on success, false if parameters are invalid.
+     *
+     * @note Every init starts the pool's slots from a different generation, so handles
+     *       left over from before a destroy + re-init of the same buffers are rejected.
+     *       Not thread-safe against use of the same pool; call before any create.
      */
     bool cfuture_pool_init(cfuture_pool_t *pool, uint32_t capacity, size_t payload_size,
                            cfuture_slot_t *slots_buf, uint8_t *payload_buf,
@@ -221,6 +249,12 @@ extern "C"
      * @param[out]    out_status  Receives status code (0 = success) or error code (optional, can be
      * NULL).
      * @return true if completed successfully, false if timed out, dropped, or invalid.
+     *
+     * @note A stale, duplicated or already-consumed handle yields CFUTURE_ERR_INVALID.
+     *       A finite timeout never fires early (it may overshoot by one PAL clock tick).
+     *       The wait is timed with cfuture_pal_time_ms() even when an OSAL event backend
+     *       is injected, so that clock must be real: on Cortex-M link HAL_GetTick() or
+     *       override cfuture_pal_time_ms().
      */
     bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
                           int32_t *out_status);
@@ -231,6 +265,21 @@ extern "C"
      * @param[in,out] future The future handle. Invalidated upon return.
      */
     void cfuture_abandon(cfuture_t *future);
+
+    /**
+     * @brief Aborts an undispatched pair, releasing both ends in one atomic step.
+     *
+     * Intended for the requester when handing the promise to the worker failed
+     * (e.g. queue full). Succeeds only while both sides still hold the slot and
+     * neither has started waiting or resolving; this does not cancel a worker
+     * that already owns the promise.
+     *
+     * @param[in,out] promise The promise handle. Invalidated on success only.
+     * @param[in,out] future  The future handle of the same pair. Invalidated on success only.
+     * @return true if the slot was returned to the pool, false if the handles are invalid,
+     *         stale, not a pair, or either side has already acted.
+     */
+    bool cfuture_cancel(cpromise_t *promise, cfuture_t *future);
 
     /**
      * @brief Checks if the consumer is still actively waiting for the promise.
@@ -244,7 +293,8 @@ extern "C"
      * @brief Fulfills the promise with a result value and notifies the consumer.
      *
      * @param[in,out] promise    The promise handle. Invalidated upon return.
-     * @param[in]     payload    Result data to copy into pool slot (optional if payload_size == 0).
+     * @param[in]     payload    Result data to copy into pool slot. NULL delivers a zero-filled
+     *                           payload, never the slot's previous contents.
      * @param[in]     status_code Status code (0 = success / CFUTURE_OK).
      */
     void cpromise_set_value(cpromise_t *promise, const void *payload, int32_t status_code);
@@ -261,7 +311,8 @@ extern "C"
      * @brief Fulfills the promise from an Interrupt Service Routine (ISR).
      *
      * @param[in,out] promise    The promise handle. Invalidated upon return.
-     * @param[in]     payload    Result data to copy into pool slot (optional if payload_size == 0).
+     * @param[in]     payload    Result data to copy into pool slot. NULL delivers a zero-filled
+     *                           payload, never the slot's previous contents.
      * @param[in]     status_code Status code (0 = success / CFUTURE_OK).
      */
     void cpromise_set_value_from_isr(cpromise_t *promise, const void *payload, int32_t status_code);
@@ -289,12 +340,24 @@ extern "C"
     {                                                                                              \
         uint8_t slot_id;                                                                           \
         cfuture_pool_t *pool;                                                                      \
+        uint32_t generation;                                                                       \
     } subsystem_name##_future_t;                                                                   \
     typedef struct                                                                                 \
     {                                                                                              \
         uint8_t slot_id;                                                                           \
         cfuture_pool_t *pool;                                                                      \
+        uint32_t generation;                                                                       \
     } subsystem_name##_promise_t;                                                                  \
+    CFUTURE_STATIC_ASSERT(                                                                         \
+        sizeof(subsystem_name##_future_t) == sizeof(cfuture_t) &&                                  \
+            offsetof(subsystem_name##_future_t, pool) == offsetof(cfuture_t, pool) &&              \
+            offsetof(subsystem_name##_future_t, generation) == offsetof(cfuture_t, generation),    \
+        "typed future handle must mirror cfuture_t");                                              \
+    CFUTURE_STATIC_ASSERT(                                                                         \
+        sizeof(subsystem_name##_promise_t) == sizeof(cpromise_t) &&                                \
+            offsetof(subsystem_name##_promise_t, pool) == offsetof(cpromise_t, pool) &&            \
+            offsetof(subsystem_name##_promise_t, generation) == offsetof(cpromise_t, generation),  \
+        "typed promise handle must mirror cpromise_t");                                            \
     static inline bool subsystem_name##_create(                                                    \
         cfuture_pool_t *pool, subsystem_name##_promise_t *p, subsystem_name##_future_t *f)         \
     {                                                                                              \
@@ -309,6 +372,11 @@ extern "C"
     static inline void subsystem_name##_future_abandon(subsystem_name##_future_t *f)               \
     {                                                                                              \
         cfuture_abandon((cfuture_t *)f);                                                           \
+    }                                                                                              \
+    static inline bool subsystem_name##_cancel(subsystem_name##_promise_t *p,                      \
+                                               subsystem_name##_future_t *f)                       \
+    {                                                                                              \
+        return cfuture_cancel((cpromise_t *)p, (cfuture_t *)f);                                    \
     }                                                                                              \
     static inline bool subsystem_name##_promise_is_active(const subsystem_name##_promise_t *p)     \
     {                                                                                              \

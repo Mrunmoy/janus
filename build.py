@@ -148,9 +148,13 @@ def run_coverage():
     run_cmd(["ctest", "--test-dir", build_dir])
 
     if shutil.which("lcov"):
-        gcov_tool = "llvm-cov gcov" if shutil.which("llvm-cov") else "gcov"
+        # lcov 2.x takes a tool plus its arguments as repeated --gcov-tool flags;
+        # a single quoted "llvm-cov gcov" is looked up as one executable and fails.
+        gcov_tool = (
+            "--gcov-tool llvm-cov --gcov-tool gcov" if shutil.which("llvm-cov") else "--gcov-tool gcov"
+        )
         cmd = (
-            f"lcov --gcov-tool \"{gcov_tool}\" --capture --directory {build_dir} "
+            f"lcov {gcov_tool} --capture --directory {build_dir} "
             f"--output-file {build_dir}/coverage.info --ignore-errors unused,unsupported,version "
             f"--exclude '/nix/*' --exclude '*/tests/*' --exclude '*/benchmarks/*' --exclude '*/usr/*' "
             f"&& lcov --list {build_dir}/coverage.info"

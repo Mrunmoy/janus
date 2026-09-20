@@ -208,3 +208,100 @@ TEST_F(ConcurrencyStressTest, ConcurrentCreateFulfillConsumeCycles)
                   (uint_fast32_t)CFUTURE_STATE_IDLE);
     }
 }
+
+// ── Generation / ownership hardening ────────────────────────────────────────
+
+TEST_F(ConcurrencyStressTest, ConcurrentDuplicateProducers_ExactlyOneWins)
+{
+    static constexpr uint32_t kIterations = 5000;
+
+    for (uint32_t i = 0; i < kIterations; ++i)
+    {
+        cpromise_t promise{};
+        cfuture_t future{};
+        ASSERT_TRUE(cfuture_create(&m_pool, &promise, &future));
+        cpromise_t copy_a = promise;
+        cpromise_t copy_b = promise;
+
+        std::atomic<bool> go{false};
+        auto producer = [&go](cpromise_t *p, uint32_t id)
+        {
+            while (!go.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+            Payload tx{id, id, ~id};
+            cpromise_set_value(p, &tx, 0);
+        };
+
+        std::thread thread_a(producer, &copy_a, 0xAAAAAAAAU);
+        std::thread thread_b(producer, &copy_b, 0xBBBBBBBBU);
+        go.store(true, std::memory_order_release);
+
+        Payload rx{};
+        int32_t status = -999;
+        const bool ok = cfuture_wait_for(&future, 5000, &rx, &status);
+        thread_a.join();
+        thread_b.join();
+
+        ASSERT_TRUE(ok);
+        ASSERT_EQ(status, 0);
+        // A torn payload would mean both duplicates wrote the slot.
+        ASSERT_TRUE(rx.sequence_id == 0xAAAAAAAAU || rx.sequence_id == 0xBBBBBBBBU);
+        ASSERT_EQ(rx.thread_id, rx.sequence_id);
+        ASSERT_EQ(rx.checksum, ~rx.sequence_id);
+        ASSERT_EQ(m_pool.allocated_mask.load(std::memory_order_acquire), 0U);
+    }
+}
+
+TEST_F(ConcurrencyStressTest, StaleProducerHammer_NeverReachesLaterOccupants)
+{
+    static constexpr uint32_t kIterations = 20000;
+    static constexpr uint32_t kPoison = 0xDEADDEADU;
+
+    std::mutex spent_mtx;
+    cpromise_t spent{};
+    std::atomic<bool> stop{false};
+
+    // Replays already-resolved promise handles while their slots are being reused.
+    std::thread hammer(
+        [&]()
+        {
+            while (!stop.load(std::memory_order_acquire))
+            {
+                cpromise_t replay{};
+                {
+                    std::lock_guard<std::mutex> lock(spent_mtx);
+                    replay = spent;
+                }
+                Payload poison{kPoison, kPoison, kPoison};
+                cpromise_set_value(&replay, &poison, -1);
+            }
+        });
+
+    for (uint32_t i = 0; i < kIterations; ++i)
+    {
+        cpromise_t promise{};
+        cfuture_t future{};
+        ASSERT_TRUE(cfuture_create(&m_pool, &promise, &future));
+        cpromise_t copy = promise;
+
+        Payload tx{i, 0U, ~i};
+        cpromise_set_value(&promise, &tx, 0);
+        {
+            std::lock_guard<std::mutex> lock(spent_mtx);
+            spent = copy;
+        }
+
+        Payload rx{};
+        int32_t status = -999;
+        ASSERT_TRUE(cfuture_wait_for(&future, 5000, &rx, &status));
+        ASSERT_EQ(status, 0);
+        ASSERT_EQ(rx.sequence_id, i);
+        ASSERT_EQ(rx.checksum, ~i);
+    }
+
+    stop.store(true, std::memory_order_release);
+    hammer.join();
+    EXPECT_EQ(m_pool.allocated_mask.load(std::memory_order_acquire), 0U);
+}

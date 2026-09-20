@@ -217,7 +217,27 @@ TEST_F(LifecycleTest, WaitRejectsNullOrInvalidFuture)
     EXPECT_FALSE(cfuture_wait_for(nullptr, 10, nullptr, &err));
     EXPECT_EQ(err, CFUTURE_ERR_INVALID);
 
-    cfuture_t invalid_f{CFUTURE_INVALID_SLOT, nullptr};
+    cfuture_t invalid_f{CFUTURE_INVALID_SLOT, nullptr, 0U};
     EXPECT_FALSE(cfuture_wait_for(&invalid_f, 10, nullptr, &err));
     EXPECT_EQ(err, CFUTURE_ERR_INVALID);
+}
+
+TEST_F(LifecycleTest, NullPayloadCompletion_DoesNotLeakPreviousOccupantData)
+{
+    cpromise_t promise{};
+    cfuture_t future{};
+    ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
+    uint32_t secret = 0xAAAAAAAAU;
+    cpromise_set_value(&promise, &secret, 0);
+    uint32_t out = 0;
+    ASSERT_TRUE(cfuture_wait_for(&future, 0, &out, nullptr));
+
+    // Same slot, next occupant, completed without a payload.
+    ASSERT_TRUE(cfuture_create(&pool, &promise, &future));
+    ASSERT_EQ(future.slot_id, 0U);
+    cpromise_set_value(&promise, nullptr, 0);
+
+    out = 0x55555555U;
+    EXPECT_TRUE(cfuture_wait_for(&future, 0, &out, nullptr));
+    EXPECT_EQ(out, 0U);
 }

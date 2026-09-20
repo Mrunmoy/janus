@@ -88,3 +88,50 @@ TEST_F(TypedPoolTest, TypedAbandon)
 
     EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
 }
+
+TEST_F(TypedPoolTest, TypedFulfillFromIsr)
+{
+    Motor_promise_t promise{};
+    Motor_future_t future{};
+    ASSERT_TRUE(Motor_create(&pool, &promise, &future));
+
+    MotorTelemetry tx{1200.0f, 0.5f, 7};
+    Motor_promise_set_from_isr(&promise, &tx, 0);
+    EXPECT_EQ(promise.pool, nullptr);
+
+    MotorTelemetry rx{};
+    int32_t err = -1;
+    EXPECT_TRUE(Motor_future_wait(&future, 100, &rx, &err));
+    EXPECT_FLOAT_EQ(rx.rpm, 1200.0f);
+    EXPECT_EQ(rx.fault_code, 7);
+    EXPECT_EQ(err, 0);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
+}
+
+TEST_F(TypedPoolTest, TypedDropFromIsr)
+{
+    Motor_promise_t promise{};
+    Motor_future_t future{};
+    ASSERT_TRUE(Motor_create(&pool, &promise, &future));
+
+    Motor_promise_drop_from_isr(&promise, CFUTURE_ERR_DROPPED);
+
+    MotorTelemetry rx{};
+    int32_t err = 0;
+    EXPECT_FALSE(Motor_future_wait(&future, 100, &rx, &err));
+    EXPECT_EQ(err, CFUTURE_ERR_DROPPED);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
+}
+
+TEST_F(TypedPoolTest, TypedCancelReleasesUndispatchedPair)
+{
+    Motor_promise_t promise{};
+    Motor_future_t future{};
+    ASSERT_TRUE(Motor_create(&pool, &promise, &future));
+    EXPECT_NE(promise.generation, 0U);
+
+    EXPECT_TRUE(Motor_cancel(&promise, &future));
+    EXPECT_EQ(promise.pool, nullptr);
+    EXPECT_EQ(future.pool, nullptr);
+    EXPECT_EQ(pool.allocated_mask.load(std::memory_order_acquire), 0U);
+}
