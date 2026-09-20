@@ -194,6 +194,77 @@ def run_lint():
         log_warn("clang-format not installed; skipping format check.")
 
 
+def run_docs_check(build_dir="build"):
+    """Fails when README.md drifts from the code it documents."""
+    import glob
+    import re
+
+    log_info("Checking README.md against the code...")
+    readme = open(os.path.join(SCRIPT_DIR, "README.md"), encoding="utf-8").read()
+    problems = []
+
+    def read_all(patterns):
+        text = ""
+        for pattern in patterns:
+            for path in glob.glob(os.path.join(SCRIPT_DIR, pattern), recursive=True):
+                text += open(path, encoding="utf-8").read()
+        return text
+
+    code = read_all(["include/**/*.h", "src/**/*.c", "tests/*", "benchmarks/*", "examples/*"])
+    api = read_all(["include/**/*.h"])
+
+    # Every library identifier the README mentions must exist somewhere in the code.
+    for ident in sorted(set(re.findall(r"\b(?:cfuture|cpromise|CFUTURE)_[A-Za-z0-9_]+", readme))):
+        if ident != "cfuture_palh" and not re.search(r"\b" + re.escape(ident) + r"\b", code):
+            problems.append(f"README names '{ident}', which does not exist in the code")
+
+    # Every public function must be documented.
+    for func in sorted(set(re.findall(r"\b((?:cfuture|cpromise)_[a-z_]+)\s*\(", api))):
+        if not re.search(r"\b" + re.escape(func) + r"\b", readme):
+            problems.append(f"public function '{func}' is not mentioned in README")
+
+    # Test suites: each file listed, and the stated suite count correct.
+    suites = sorted(glob.glob(os.path.join(SCRIPT_DIR, "tests", "test_*.cpp")))
+    for path in suites:
+        if os.path.basename(path) not in readme:
+            problems.append(f"{os.path.basename(path)} is missing from README")
+    for count in re.findall(r"(\d+)[- ](?:dedicated )?suites?\b", readme):
+        if int(count) != len(suites):
+            problems.append(f"README says {count} suites, there are {len(suites)}")
+
+    # Constants quoted with a value.
+    retries = re.search(r"#define CFUTURE_CAS_MAX_RETRIES \(\(uint32_t\)(\d+)U\)", code)
+    quoted = re.search(r"`CFUTURE_CAS_MAX_RETRIES` \((\d+) attempts\)", readme)
+    if retries and quoted and retries.group(1) != quoted.group(1):
+        problems.append(f"README says {quoted.group(1)} CAS retries, code says {retries.group(1)}")
+
+    # Every build.py flag must be documented.
+    for flag in sorted(set(re.findall(r'add_argument\(\s*"(--[a-z]+)"', open(__file__).read()))):
+        if f"build.py {flag}" not in readme:
+            problems.append(f"build.py {flag} is not documented in README")
+
+    # Footprint table must match the built library (same toolchain as the README states).
+    lib = os.path.join(SCRIPT_DIR, build_dir, "libcfuture.a")
+    if shutil.which("size") and os.path.exists(lib):
+        out = subprocess.run(["size", lib], capture_output=True, text=True, check=False).stdout
+        for line in out.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 6 and parts[5] in ("cfuture.c.o", "cfuture_pal.c.o"):
+                text, _data, bss = parts[0], parts[1], parts[2]
+                if not re.search(rf"\b{text}\s+\d+\s+{bss}\s+\d+\s+\w+\s+{re.escape(parts[5])}", readme):
+                    problems.append(
+                        f"README footprint row for {parts[5]} is stale (now text={text} bss={bss})"
+                    )
+    else:
+        log_warn("libcfuture.a or 'size' not found; skipping footprint comparison.")
+
+    if problems:
+        for problem in problems:
+            log_error(problem)
+        sys.exit(1)
+    log_success("README.md is consistent with the code.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="libcfuture Build, Test, Benchmark, and Quality CLI"
@@ -207,6 +278,7 @@ def main():
     parser.add_argument("--stats", action="store_true", help="Check size footprint and zero heap")
     parser.add_argument("--coverage", action="store_true", help="Generate lcov coverage report")
     parser.add_argument("--lint", action="store_true", help="Run cppcheck and clang-format checks")
+    parser.add_argument("--docs", action="store_true", help="Check README.md against the code")
     parser.add_argument(
         "--all",
         action="store_true",
@@ -231,6 +303,7 @@ def main():
         run_asan()
         run_stats()
         run_lint()
+        run_docs_check()
         run_benchmarks()
         log_success("All quality pipeline gates passed successfully!")
         return
@@ -258,6 +331,9 @@ def main():
 
     if args.lint:
         run_lint()
+
+    if args.docs:
+        run_docs_check()
 
 
 if __name__ == "__main__":

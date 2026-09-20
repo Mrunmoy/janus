@@ -8,8 +8,8 @@
 [![Code Coverage: 97.9%](https://img.shields.io/badge/Line%20Coverage-97.9%25-brightgreen.svg)]()
 [![ThreadSanitizer Clean](https://img.shields.io/badge/ThreadSanitizer-Verified%20(100k%20Cycles)-success.svg)]()
 [![ASan & UBSan Clean](https://img.shields.io/badge/Sanitizers-ASan%20%7C%20UBSan%20Clean-success.svg)]()
-[![ROM Footprint: < 6 KB](https://img.shields.io/badge/ROM%20Footprint-%3C%206%20KB%20(5617%20Bytes)-orange.svg)]()
-[![RAM Mutable: 0 Bytes](https://img.shields.io/badge/RAM%20Mutable-0%20Bytes%20(.bss%2F.data)-blue.svg)]()
+[![ROM Footprint: < 5 KB](https://img.shields.io/badge/ROM%20Footprint-%3C%205%20KB%20(4378%20Bytes)-orange.svg)]()
+[![RAM Mutable: 1 Word](https://img.shields.io/badge/RAM%20Mutable-1%20Word%20(.bss)-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 `libcfuture` is a zero-heap, deterministic, lock-free future/promise library written in pure ISO C11. Engineered specifically for hard real-time embedded firmware, multi-core microcontrollers, and low-latency host systems, it provides safe asynchronous message passing and request-response pipelining between threads and Interrupt Service Routines (ISRs) without dynamic memory allocation, priority inversion, or dangling pointers.
@@ -262,7 +262,7 @@ while (retries < CFUTURE_CAS_MAX_RETRIES)
 return false; // Contention budget exceeded
 ```
 
-- **Bounded Execution**: Bounded strictly by `CFUTURE_CAS_MAX_RETRIES` (64 attempts), ensuring execution time is deterministic and compliant with hard real-time scheduling constraints.
+- **Bounded Execution**: Bounded strictly by `CFUTURE_CAS_MAX_RETRIES` (1000 attempts), ensuring execution time is deterministic and compliant with hard real-time scheduling constraints.
 - **Fast-Path Bit Scan**: Leverages hardware Count Trailing Zeros (`__builtin_ctz` or `_BitScanForward`) for single-cycle slot discovery.
 
 ---
@@ -294,7 +294,9 @@ typedef struct
     void (*event_destroy)(void *event_handle);
     /** Signals the event from task context. */
     void (*event_set)(void *event_handle);
-    /** Waits for the event to be signaled, with timeout in ms. Returns true if signaled. */
+    /** Waits for the event to be signaled, with timeout in ms (UINT32_MAX = forever).
+     *  Returns true if signaled. The result is only a wakeup hint: the core re-checks
+     *  slot state and the PAL clock after every return. */
     bool (*event_wait)(void *event_handle, uint32_t timeout_ms);
     /** Resets the event to unsignaled state prior to slot reuse (optional, can be NULL). */
     void (*event_reset)(void *event_handle);
@@ -326,7 +328,7 @@ The library provides macro-generated type-safe pools via `CFUTURE_DEFINE_TYPED_P
 
 ### State Transition Diagram
 
-Every slot transitions deterministically across five discrete states:
+Every slot transitions deterministically across six discrete states (`IDLE`, `PENDING`, `COMPLETED`, `DROPPED`, `TIMEOUT`, `ABANDONED`):
 
 ```mermaid
 stateDiagram-v2
@@ -773,12 +775,14 @@ void DMA2_Stream0_IRQHandler(void)
 
 | Platform / RTOS | Adapter Header | Sync Primitive | ISR Reentrant? | Memory Allocation | Typical Latency |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Linux / macOS (POSIX)** | `adapters/cfuture_posix.h` | `pthread_mutex` + `pthread_cond` | No | Zero-Heap Static | ~55 ns |
-| **Windows (Win32)** | `adapters/cfuture_win32.h` | Win32 Auto-Reset Event | No | Zero-Heap Static | ~60 ns |
-| **Bare-Metal / Polling** | `adapters/cfuture_polling.h` | Atomic Spinloop (`atomic_flag`) | **Yes** | Zero-Heap Static | ~45 ns |
+| **Linux / macOS (POSIX)** | `adapters/cfuture_posix.h` | `pthread_mutex` + `pthread_cond` (`CLOCK_MONOTONIC`) | No | Zero-Heap Static | ~70 ns |
+| **Windows (Win32)** | `adapters/cfuture_win32.h` | Win32 Manual-Reset Event | No | Zero-Heap Static | not re-measured |
+| **Bare-Metal / Polling** | `adapters/cfuture_polling.h` | Polls slot state with `cfuture_pal_cpu_relax()` | **Yes** | Zero-Heap Static | ~59 ns |
 | **FreeRTOS / CMSIS-OS2** | Hardware Showcase Repo | `EventGroup` / `osEventFlags` | **Yes** (`_FromISR`) | Zero-Heap Static | ~1.2 $\mu$s |
 | **Azure RTOS ThreadX** | Hardware Showcase Repo | `TX_EVENT_FLAGS_GROUP` | **Yes** (`tx_event_flags_set`) | Zero-Heap Static | ~0.9 $\mu$s |
 | **Zephyr RTOS** | Hardware Showcase Repo | `struct k_event` | **Yes** (ISRs supported) | Zero-Heap Static | ~1.1 $\mu$s |
+
+Host latencies are the full create → fulfil → wait roundtrip measured with `bench_throughput` on an Intel Core i7-8700K (Clang 21, `-O3`). The Win32 and RTOS figures come from their own targets and predate the generation-tagged ownership model; they have not been re-measured.
 
 ---
 
@@ -868,19 +872,19 @@ When running on multi-core microcontrollers (e.g., Raspberry Pi RP2040 dual Cort
 
 ### Static Memory Footprint
 
-Measured on release library build (`gcc 13.3.0 -O3 -DNDEBUG`):
+Measured on release library build inside the Nix dev shell (`clang 21.1.8 -O3 -DNDEBUG`, x86_64):
 
 ```text
 --- Binary Footprint (size libcfuture.a) ---
    text    data     bss     dec     hex filename
-   5368       0       0    5368    14f8 cfuture.c.o
-    249       0       0     249      f9 cfuture_pal.c.o
-    153       0       0     153      99 cfuture_polling.c.o
-   1609      48   12329   13986    36a2 cfuture_posix.c.o
+   4160       0       8    4168    1048 cfuture.c.o
+    218       0       0     218      da cfuture_pal.c.o
+    117       0       0     117      75 cfuture_polling.c.o
+   1142      48   12337   13527    34d7 cfuture_posix.c.o
 ```
 
-- **Core ROM Footprint**: **5,368 bytes** (5,617 bytes including PAL, < 6 KB).
-- **Mutable Global RAM (`.data` / `.bss`)**: **0 bytes**.
+- **Core ROM Footprint**: **4,160 bytes** (4,378 bytes including PAL, < 5 KB).
+- **Mutable Global RAM (`.data` / `.bss`)**: **one `uint_fast32_t`** in the core (8 bytes on this 64-bit host, 4 bytes on Cortex-M): the pool-init epoch counter that gives every pool life a different starting generation. All pool, slot and payload storage is caller-provided. The POSIX adapter's static event table is host-only.
 - **Dynamic Heap Memory (`malloc`/`free`)**: **0 bytes** (Audited via `nm`).
 
 ---
@@ -953,6 +957,7 @@ python3 build.py --all
 | `python3 build.py --asan` | Builds and runs ASan & UBSan suite in `build_asan/`. |
 | `python3 build.py --stats` | Measures ROM/RAM size and verifies zero dynamic memory symbols via `nm`. |
 | `python3 build.py --lint` | Runs `cppcheck` static analysis and `clang-format` style check. |
+| `python3 build.py --docs` | Fails if `README.md` drifts from the code: unknown identifiers, undocumented API or flags, missing test suites, wrong suite count, stale footprint table. Part of `--all`. |
 | `python3 build.py --bench` | Compiles and executes micro-benchmark suite. |
 | `python3 build.py --coverage` | Generates LCOV HTML code coverage reports in `build_cov/`. |
 | `python3 build.py --clean` | Wipes all build artifacts and test output directories. |
