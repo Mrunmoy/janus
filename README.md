@@ -262,7 +262,7 @@ while (retries < CFUTURE_CAS_MAX_RETRIES)
 return false; // Contention budget exceeded
 ```
 
-- **Bounded Execution**: Bounded strictly by `CFUTURE_CAS_MAX_RETRIES` (64 attempts), ensuring execution time is deterministic and compliant with hard real-time scheduling constraints.
+- **Bounded Execution**: Bounded strictly by `CFUTURE_CAS_MAX_RETRIES` (1000 attempts), ensuring execution time is deterministic and compliant with hard real-time scheduling constraints.
 - **Fast-Path Bit Scan**: Leverages hardware Count Trailing Zeros (`__builtin_ctz` or `_BitScanForward`) for single-cycle slot discovery.
 
 ---
@@ -328,7 +328,7 @@ The library provides macro-generated type-safe pools via `CFUTURE_DEFINE_TYPED_P
 
 ### State Transition Diagram
 
-Every slot transitions deterministically across five discrete states:
+Every slot transitions deterministically across six discrete states (`IDLE`, `PENDING`, `COMPLETED`, `DROPPED`, `TIMEOUT`, `ABANDONED`):
 
 ```mermaid
 stateDiagram-v2
@@ -775,12 +775,14 @@ void DMA2_Stream0_IRQHandler(void)
 
 | Platform / RTOS | Adapter Header | Sync Primitive | ISR Reentrant? | Memory Allocation | Typical Latency |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Linux / macOS (POSIX)** | `adapters/cfuture_posix.h` | `pthread_mutex` + `pthread_cond` | No | Zero-Heap Static | ~55 ns |
-| **Windows (Win32)** | `adapters/cfuture_win32.h` | Win32 Auto-Reset Event | No | Zero-Heap Static | ~60 ns |
-| **Bare-Metal / Polling** | `adapters/cfuture_polling.h` | Atomic Spinloop (`atomic_flag`) | **Yes** | Zero-Heap Static | ~45 ns |
+| **Linux / macOS (POSIX)** | `adapters/cfuture_posix.h` | `pthread_mutex` + `pthread_cond` (`CLOCK_MONOTONIC`) | No | Zero-Heap Static | ~70 ns |
+| **Windows (Win32)** | `adapters/cfuture_win32.h` | Win32 Manual-Reset Event | No | Zero-Heap Static | not re-measured |
+| **Bare-Metal / Polling** | `adapters/cfuture_polling.h` | Polls slot state with `cfuture_pal_cpu_relax()` | **Yes** | Zero-Heap Static | ~59 ns |
 | **FreeRTOS / CMSIS-OS2** | Hardware Showcase Repo | `EventGroup` / `osEventFlags` | **Yes** (`_FromISR`) | Zero-Heap Static | ~1.2 $\mu$s |
 | **Azure RTOS ThreadX** | Hardware Showcase Repo | `TX_EVENT_FLAGS_GROUP` | **Yes** (`tx_event_flags_set`) | Zero-Heap Static | ~0.9 $\mu$s |
 | **Zephyr RTOS** | Hardware Showcase Repo | `struct k_event` | **Yes** (ISRs supported) | Zero-Heap Static | ~1.1 $\mu$s |
+
+Host latencies are the full create → fulfil → wait roundtrip measured with `bench_throughput` on an Intel Core i7-8700K (Clang 21, `-O3`). The Win32 and RTOS figures come from their own targets and predate the generation-tagged ownership model; they have not been re-measured.
 
 ---
 
@@ -955,6 +957,7 @@ python3 build.py --all
 | `python3 build.py --asan` | Builds and runs ASan & UBSan suite in `build_asan/`. |
 | `python3 build.py --stats` | Measures ROM/RAM size and verifies zero dynamic memory symbols via `nm`. |
 | `python3 build.py --lint` | Runs `cppcheck` static analysis and `clang-format` style check. |
+| `python3 build.py --docs` | Fails if `README.md` drifts from the code: unknown identifiers, undocumented API or flags, missing test suites, wrong suite count, stale footprint table. Part of `--all`. |
 | `python3 build.py --bench` | Compiles and executes micro-benchmark suite. |
 | `python3 build.py --coverage` | Generates LCOV HTML code coverage reports in `build_cov/`. |
 | `python3 build.py --clean` | Wipes all build artifacts and test output directories. |
