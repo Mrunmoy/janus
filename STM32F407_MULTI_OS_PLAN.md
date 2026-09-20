@@ -1,6 +1,6 @@
 # Master Implementation Plan: Unified Multi-RTOS STM32F407 USB Storage Showcase
 
-> **Status note**: this is the original plan for the companion repository, <https://github.com/Mrunmoy/STM32F407VGT6>, which now exists and vendors `janus` under `external/cfuture`. The plan is kept for reference and may be out of date: for example it names the MCU STM32F407ZGT6, while that repository's linker scripts target the STM32F407VG. It records intent, not verified results.
+> **Status note**: this is the original plan for the companion repository, <https://github.com/Mrunmoy/STM32F407VGT6>, which now exists and vendors `janus` under `external/cfuture`. The board is an FK407M2-ZGT6 (STM32F407ZGT6, 144-pin LQFP), as this plan says; the repository name and its CubeMX project and linker scripts use the STM32F407VGT6 part number, which has the same 1 MB flash and 192 KB SRAM in a 100-pin package. The plan is kept for reference and records intent, not verified results.
 
 > **Target Audience**: Autonomous Embedded Firmware Developer / Engineer  
 > **Repository Type**: Single-Branch Unified Multi-Target Hardware Showcase Repository  
