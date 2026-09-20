@@ -14,7 +14,6 @@
 #ifndef CFUTURE_PAL_H
 #define CFUTURE_PAL_H
 
-#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -25,8 +24,8 @@ extern "C"
     /**
      * @brief Reads the monotonic hardware clock in milliseconds.
      *
-     * Times every cfuture_wait_for() deadline in polling mode, and with an OSAL event
-     * backend whenever cfuture_pal_clock_is_real() returns true.
+     * Times cfuture_wait_for() deadlines in polling mode only. With an OSAL event backend
+     * the backend's own timeout is the time base and this clock is not consulted.
      * Default implementations provide POSIX clock_gettime() or Win32 GetTickCount64().
      * On ARM Cortex-M, weakly calls HAL_GetTick() if linked, or advances a monotonic
      * fallback counter to guarantee bounded timeout termination if unlinked. That
@@ -36,23 +35,6 @@ extern "C"
      * @return Monotonic elapsed time in milliseconds.
      */
     uint32_t cfuture_pal_time_ms(void);
-
-    /**
-     * @brief Reports whether cfuture_pal_time_ms() returns real elapsed milliseconds.
-     *
-     * Default implementations return true on POSIX and Win32, and on ARM Cortex-M only when
-     * HAL_GetTick() is linked (otherwise cfuture_pal_time_ms() merely counts calls).
-     *
-     * cfuture_wait_for() uses this to pick its time base when an OSAL event backend is
-     * injected: with a real clock the deadline is timed by the clock and the backend's wait
-     * result is only a wakeup hint; without one, the backend's own timeout is the time base.
-     * A target that overrides cfuture_pal_time_ms() with a real timer should override this
-     * weak function too (return true); leaving it false is safe, it only forgoes the
-     * tolerance for backends that return early.
-     *
-     * @return true if the PAL clock advances in real milliseconds.
-     */
-    bool cfuture_pal_clock_is_real(void);
 
     /**
      * @brief Relaxes the CPU core while waiting for events.

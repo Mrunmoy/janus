@@ -1,10 +1,11 @@
 /**
  * @file test_pal_fallback.cpp
- * @brief cfuture_wait_for() behaviour when the PAL has no real millisecond clock.
+ * @brief cfuture_wait_for() behaviour when the PAL clock is not a real millisecond clock.
  *
- * Models a Cortex-M build with neither HAL_GetTick() nor a PAL override: the PAL clock
- * only counts calls, while the injected OSAL backend blocks for real. This binary
- * overrides the weak PAL symbols, so it must stay separate from the other suites.
+ * Models a port whose PAL clock merely counts calls (Cortex-M with no tick linked) or is
+ * mis-scaled, while the injected OSAL backend blocks for real: in event mode the backend's
+ * timeout is the time base, so the wait must not be multiplied. This binary overrides a
+ * weak PAL symbol, so it must stay separate from the other suites.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -25,11 +26,6 @@ extern "C"
     {
         static std::atomic<uint32_t> s_calls{0};
         return s_calls.fetch_add(1U, std::memory_order_relaxed) + 1U;
-    }
-
-    bool cfuture_pal_clock_is_real(void)
-    {
-        return false;
     }
 }
 

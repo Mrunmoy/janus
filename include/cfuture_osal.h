@@ -42,11 +42,12 @@ extern "C"
          *  event_set_from_isr is NULL. Needed whenever event_wait is set. */
         void (*event_set)(void *event_handle);
         /** Waits for the event to be signaled, with timeout in ms (UINT32_MAX = forever).
-         *  Returns true if signaled. With a real PAL clock the result is only a wakeup hint:
-         *  the core re-checks slot state and the clock after every return, so an early or
-         *  spurious return costs a loop iteration. Without a real PAL clock
-         *  (cfuture_pal_clock_is_real() == false) a false return ends the wait as a timeout,
-         *  so the backend must then only return false once timeout_ms has elapsed. */
+         *  Returns true if signaled. The backend's timed wait is the library's time base in
+         *  event mode: a false return from a finite wait ends cfuture_wait_for() as a timeout
+         *  and is not retried, so return false only once timeout_ms has elapsed and absorb
+         *  spurious wakeups inside the adapter. A true return with nothing resolved is
+         *  treated as a stale signal (reset, then waited on again a bounded number of
+         *  times). A false return from a UINT32_MAX wait is retried. */
         bool (*event_wait)(void *event_handle, uint32_t timeout_ms);
         /** Resets the event to unsignaled state. Called from cfuture_create() (any creator
          *  task) before slot reuse, and from the waiting task when a wait reports a signal

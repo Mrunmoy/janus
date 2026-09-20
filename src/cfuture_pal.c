@@ -35,16 +35,9 @@ __attribute__((weak)) uint32_t cfuture_pal_time_ms(void)
     /* Fallback monotonic counter when no hardware clock is linked:
      * Advances each call so finite polling timeouts are guaranteed to terminate
      * rather than hanging indefinitely on unfulfilled promises. It counts calls, not
-     * milliseconds; cfuture_pal_clock_is_real() reports that to the core. Atomic because
-     * any number of waiting tasks call this concurrently. */
+     * milliseconds. Atomic because any number of waiting tasks call this concurrently. */
     static atomic_uint_fast32_t s_fallback_tick;
     return (uint32_t)(atomic_fetch_add_explicit(&s_fallback_tick, 1U, memory_order_relaxed) + 1U);
-}
-
-__attribute__((weak)) bool cfuture_pal_clock_is_real(void)
-{
-    extern uint32_t HAL_GetTick(void) __attribute__((weak));
-    return HAL_GetTick != NULL;
 }
 
 __attribute__((weak)) void cfuture_pal_cpu_relax(void)
@@ -61,11 +54,6 @@ __attribute__((weak)) void cfuture_pal_cpu_relax(void)
 uint32_t cfuture_pal_time_ms(void)
 {
     return (uint32_t)GetTickCount64();
-}
-
-bool cfuture_pal_clock_is_real(void)
-{
-    return true;
 }
 
 void cfuture_pal_cpu_relax(void)
@@ -89,12 +77,7 @@ __attribute__((weak)) uint32_t cfuture_pal_time_ms(void)
     return 0U;
 }
 
-__attribute__((weak)) bool cfuture_pal_clock_is_real(void)
-{
-    return true;
-}
-
-__attribute__((weak)) void cfuture_pal_cpu_relax(void)
+__attribute__((weak)) __attribute__((weak)) void cfuture_pal_cpu_relax(void)
 {
     sched_yield();
 }

@@ -272,10 +272,10 @@ extern "C"
      * @return true if completed successfully, false if timed out, dropped, or invalid.
      *
      * @note A stale, duplicated or already-consumed handle yields CFUTURE_ERR_INVALID.
-     *       With a real PAL clock a finite timeout never fires early; it overshoots by at
-     *       least one PAL clock tick plus scheduling latency. Without one (see
-     *       cfuture_pal_clock_is_real()) an injected event backend's own timeout is the time
-     *       base. In polling mode the wait busy-loops on cfuture_pal_cpu_relax().
+     *       With an OSAL event backend the backend's own timed wait is the time base, so
+     *       the timeout is as accurate as that backend. In polling mode the wait busy-loops
+     *       on cfuture_pal_cpu_relax() and is timed by cfuture_pal_time_ms(): it never
+     *       fires early and overshoots by at least one clock tick.
      */
     bool cfuture_wait_for(cfuture_t *future, uint32_t timeout_ms, void *out_payload,
                           int32_t *out_status);
