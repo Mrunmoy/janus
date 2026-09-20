@@ -3,7 +3,9 @@
  * @brief Native Windows Win32 Event Synchronization Adapter for cfuture
  *
  * Provides a zero-heap synchronization adapter for Windows developers using
- * Win32 kernel event objects (CreateEvent, SetEvent, WaitForSingleObject).
+ * Win32 kernel event objects (CreateEvent, SetEvent, WaitForSingleObject). Events are
+ * manual-reset: they stay signaled until event_reset, which the core calls on slot
+ * reuse and when it sees a stale signal during a wait.
  *
  * SPDX-License-Identifier: MIT
  */

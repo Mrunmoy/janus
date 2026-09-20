@@ -9,7 +9,7 @@
  *
  * Key guarantees:
  * - Zero dynamic memory allocation (0 bytes malloc/free).
- * - Compile-time static bounds: MAX_SLOTS capacity enforced via bitmask.
+ * - Compile-time static bounds: CFUTURE_MAX_CAPACITY slots enforced via bitmask.
  * - Lock-free, non-blocking single-slot acquisition via atomic CAS on bitmask.
  * - Dual-owner hold bits (consumer + producer) preventing premature slot recycling
  *   while the producer is signaling the consumer event. Each side can only ever
@@ -227,6 +227,9 @@ extern "C"
      * @brief Destroys a future pool and cleans up injected synchronization handles.
      *
      * @param[in,out] pool Pointer to initialized pool struct.
+     *
+     * @note Handles that still refer to the pool become no-ops afterwards. The caller
+     *       must ensure no task is inside a pool call while it is destroyed.
      */
     void cfuture_pool_destroy(cfuture_pool_t *pool);
 
@@ -237,6 +240,9 @@ extern "C"
      * @param[out]    out_promise Receives the producer handle.
      * @param[out]    out_future  Receives the consumer handle.
      * @return true if slot was successfully allocated, false if pool is full or params invalid.
+     *
+     * @note Both handles are stamped with the slot's current generation. They may be copied
+     *       (e.g. into a queue message), but only the first use of each side takes effect.
      */
     bool cfuture_create(cfuture_pool_t *pool, cpromise_t *out_promise, cfuture_t *out_future);
 
@@ -263,6 +269,8 @@ extern "C"
      * @brief Explicitly abandons a future without waiting.
      *
      * @param[in,out] future The future handle. Invalidated upon return.
+     *
+     * @note A stale, duplicated or already-consumed handle is a no-op.
      */
     void cfuture_abandon(cfuture_t *future);
 
@@ -285,7 +293,8 @@ extern "C"
      * @brief Checks if the consumer is still actively waiting for the promise.
      *
      * @param[in] promise The promise handle.
-     * @return true if caller is still waiting, false if caller timed out or abandoned.
+     * @return true if caller is still waiting, false if caller timed out or abandoned, if a
+     *         copy of this promise already started resolving, or if the handle is stale.
      */
     bool cpromise_is_active(const cpromise_t *promise);
 
@@ -334,6 +343,9 @@ extern "C"
 
 /**
  * @brief Macro generating type-safe wrapper functions for a subsystem future/promise.
+ *
+ * The generated handle types mirror cfuture_t / cpromise_t field for field; the layout is
+ * checked at compile time so the wrappers' pointer casts stay valid.
  */
 #define CFUTURE_DEFINE_TYPED_POOL(subsystem_name, payload_type, pool_capacity)                     \
     typedef struct                                                                                 \

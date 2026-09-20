@@ -9,6 +9,8 @@
  *  4. ABA Slot Isolation: Proves concurrent Task T_B cannot claim T_A's timed-out
  *     slot while T_A's request is still pending in T_S's queue.
  *  5. Hardware DMA / ISR Fulfillment: Demonstrates cpromise_set_value_from_isr().
+ *  6. Undispatched Cancellation: cfuture_cancel() returns a pair's slot to the pool in
+ *     one step when the request never reached the servicer.
  *
  * SPDX-License-Identifier: MIT
  */

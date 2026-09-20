@@ -2,8 +2,9 @@
  * @file cfuture.c
  * @brief Zero-Heap Lock-Free Future/Promise Implementation for Embedded C
  *
- * Implements the core static pool bitmask allocation, dual-owner reference
- * tracking, immediate non-blocking timeout unwinding, and ISR safety.
+ * Implements the core static pool bitmask allocation, dual-owner hold-bit
+ * tracking with generation-tagged handles, immediate non-blocking timeout unwinding, and ISR
+ * safety.
  *
  * Dual ownership (hold bits CONSUMER | PRODUCER in cfuture_slot_t::owner):
  * - Slot is allocated with both hold bits set (one per handle).

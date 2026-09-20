@@ -39,7 +39,9 @@ extern "C"
          *  slot state and the PAL clock after every return, so an early or spurious
          *  return costs a loop iteration but can never cause a false timeout. */
         bool (*event_wait)(void *event_handle, uint32_t timeout_ms);
-        /** Resets the event to unsignaled state prior to slot reuse (optional, can be NULL). */
+        /** Resets the event to unsignaled state: before slot reuse, and when a wait reports a
+         *  signal although nothing resolved (optional, can be NULL; provide it for latching
+         *  / manual-reset events). */
         void (*event_reset)(void *event_handle);
         /** Signals the event from ISR context (optional; falls back to event_set if NULL). */
         void (*event_set_from_isr)(void *event_handle);

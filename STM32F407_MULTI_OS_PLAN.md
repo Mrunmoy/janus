@@ -134,10 +134,12 @@ def main():
   - `cfuture_sync_ops_t` getter for the active OS.
   - Generic message queue: `osal_queue_create`, `osal_queue_send`, `osal_queue_receive`.
   - Generic task creation: `osal_task_create`, `osal_delay_ms`, `osal_get_time_ms`.
+  - A real millisecond tick behind `cfuture_pal_time_ms()` on every target (link `HAL_GetTick()` or override the weak symbol). `janus` times every `cfuture_wait_for()` deadline with it, including waits on an injected OSAL event; the `event_wait` result is only a wakeup hint. Each `cfuture_sync_ops_t` should also provide `event_reset`.
 - **Task 1.3**: Create `app/include/pal/` defining unified PAL interfaces (`PalLed`, `PalTimeSource`, `PalLogSink`, `PalStorage`) and block storage initialization, read, write, and FatFS disk status hooks.
 - **Task 1.4**: Integrate ChaN's FatFS under `third_party/fatfs/` (`ff.c`, `ff.h`, `diskio.h`, `ffconf.h`).
 - **Task 1.5**: Implement common application files:
   - `app/src/storage/storage_service.c`: Shared Servicer Task $T_S$ with `cpromise_is_active()` cancellation check.
+  - Requesters call `cfuture_cancel()` when `osal_queue_send` fails, so an undispatched pair returns its slot immediately.
   - `app/src/storage/client_tasks.c`: Client Tasks executing the 4 test scenarios (Happy Path, Queue Timeout Cancellation, Late Completion Discard, Queue ABA Slot Isolation).
   - `app/src/main.c`: Initializes PAL, mounts FatFS volume, spawns tasks via OSAL, prints UART banner.
 
@@ -209,5 +211,5 @@ def main():
      - Scenario 1: Fast file write succeeds.
      - Scenario 2: Cancellation detected on queued timeout -> FatFS write skipped.
      - Scenario 3: Late timeout discard -> no dangling stack pointers or memory corruption.
-     - Scenario 4: ABA isolation -> slot protected until servicer releases reference.
+     - Scenario 4: ABA isolation -> slot protected until servicer releases its producer hold.
      - Residual pool mask = `0x0`.

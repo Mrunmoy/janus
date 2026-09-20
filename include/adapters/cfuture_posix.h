@@ -4,6 +4,8 @@
  *
  * Provides a production-grade pthread condition-variable backend for host testing
  * and Linux/POSIX targets. Statically pools event primitives with zero dynamic memory.
+ * Timed waits run on CLOCK_MONOTONIC (CLOCK_REALTIME on macOS, which lacks
+ * pthread_condattr_setclock), and a UINT32_MAX timeout blocks until signaled.
  *
  * SPDX-License-Identifier: MIT
  */
