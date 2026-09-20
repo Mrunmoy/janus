@@ -34,7 +34,10 @@ extern "C"
         void (*event_destroy)(void *event_handle);
         /** Signals the event from task context. */
         void (*event_set)(void *event_handle);
-        /** Waits for the event to be signaled, with timeout in ms. Returns true if signaled. */
+        /** Waits for the event to be signaled, with timeout in ms (UINT32_MAX = forever).
+         *  Returns true if signaled. The result is only a wakeup hint: the core re-checks
+         *  slot state and the PAL clock after every return, so an early or spurious
+         *  return costs a loop iteration but can never cause a false timeout. */
         bool (*event_wait)(void *event_handle, uint32_t timeout_ms);
         /** Resets the event to unsignaled state prior to slot reuse (optional, can be NULL). */
         void (*event_reset)(void *event_handle);

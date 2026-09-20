@@ -217,7 +217,7 @@ TEST_F(LifecycleTest, WaitRejectsNullOrInvalidFuture)
     EXPECT_FALSE(cfuture_wait_for(nullptr, 10, nullptr, &err));
     EXPECT_EQ(err, CFUTURE_ERR_INVALID);
 
-    cfuture_t invalid_f{CFUTURE_INVALID_SLOT, nullptr};
+    cfuture_t invalid_f{CFUTURE_INVALID_SLOT, nullptr, 0U};
     EXPECT_FALSE(cfuture_wait_for(&invalid_f, 10, nullptr, &err));
     EXPECT_EQ(err, CFUTURE_ERR_INVALID);
 }

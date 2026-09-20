@@ -116,7 +116,7 @@ TEST_F(ErrorInjectionTest, OutOfBoundsSlotRejection)
                                   reinterpret_cast<uint8_t *>(m_payload_arena), &m_sync_ops));
 
     // Corrupted future with slot_id >= capacity
-    cfuture_t corrupted_future = {99, &m_pool};
+    cfuture_t corrupted_future = {99, &m_pool, 1U};
     int32_t err = 0;
     uint32_t val = 0;
 
@@ -126,7 +126,7 @@ TEST_F(ErrorInjectionTest, OutOfBoundsSlotRejection)
     cfuture_abandon(&corrupted_future);
 
     // Corrupted promise with slot_id >= capacity
-    cpromise_t corrupted_promise = {99, &m_pool};
+    cpromise_t corrupted_promise = {99, &m_pool, 1U};
     EXPECT_FALSE(cpromise_is_active(&corrupted_promise));
     cpromise_set_value(&corrupted_promise, &val, 0);
     cpromise_drop(&corrupted_promise, -1);
@@ -141,14 +141,14 @@ TEST_F(ErrorInjectionTest, InvalidatedHandleRejection)
     ASSERT_TRUE(cfuture_pool_init(&m_pool, kCapacity, kPayloadSize, m_slots,
                                   reinterpret_cast<uint8_t *>(m_payload_arena), &m_sync_ops));
 
-    cfuture_t invalid_f = {CFUTURE_INVALID_SLOT, nullptr};
+    cfuture_t invalid_f = {CFUTURE_INVALID_SLOT, nullptr, 0U};
     int32_t err = 0;
     uint32_t val = 0;
 
     EXPECT_FALSE(cfuture_wait_for(&invalid_f, 10, &val, &err));
     EXPECT_EQ(err, CFUTURE_ERR_INVALID);
 
-    cpromise_t invalid_p = {CFUTURE_INVALID_SLOT, nullptr};
+    cpromise_t invalid_p = {CFUTURE_INVALID_SLOT, nullptr, 0U};
     EXPECT_FALSE(cpromise_is_active(&invalid_p));
 }
 
