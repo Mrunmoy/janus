@@ -8,8 +8,8 @@
 [![Code Coverage: 97.9%](https://img.shields.io/badge/Line%20Coverage-97.9%25-brightgreen.svg)]()
 [![ThreadSanitizer Clean](https://img.shields.io/badge/ThreadSanitizer-Verified%20(100k%20Cycles)-success.svg)]()
 [![ASan & UBSan Clean](https://img.shields.io/badge/Sanitizers-ASan%20%7C%20UBSan%20Clean-success.svg)]()
-[![ROM Footprint: < 6 KB](https://img.shields.io/badge/ROM%20Footprint-%3C%206%20KB%20(5617%20Bytes)-orange.svg)]()
-[![RAM Mutable: 0 Bytes](https://img.shields.io/badge/RAM%20Mutable-0%20Bytes%20(.bss%2F.data)-blue.svg)]()
+[![ROM Footprint: < 5 KB](https://img.shields.io/badge/ROM%20Footprint-%3C%205%20KB%20(4378%20Bytes)-orange.svg)]()
+[![RAM Mutable: 1 Word](https://img.shields.io/badge/RAM%20Mutable-1%20Word%20(.bss)-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 `libcfuture` is a zero-heap, deterministic, lock-free future/promise library written in pure ISO C11. Engineered specifically for hard real-time embedded firmware, multi-core microcontrollers, and low-latency host systems, it provides safe asynchronous message passing and request-response pipelining between threads and Interrupt Service Routines (ISRs) without dynamic memory allocation, priority inversion, or dangling pointers.
@@ -294,7 +294,9 @@ typedef struct
     void (*event_destroy)(void *event_handle);
     /** Signals the event from task context. */
     void (*event_set)(void *event_handle);
-    /** Waits for the event to be signaled, with timeout in ms. Returns true if signaled. */
+    /** Waits for the event to be signaled, with timeout in ms (UINT32_MAX = forever).
+     *  Returns true if signaled. The result is only a wakeup hint: the core re-checks
+     *  slot state and the PAL clock after every return. */
     bool (*event_wait)(void *event_handle, uint32_t timeout_ms);
     /** Resets the event to unsignaled state prior to slot reuse (optional, can be NULL). */
     void (*event_reset)(void *event_handle);
@@ -868,19 +870,19 @@ When running on multi-core microcontrollers (e.g., Raspberry Pi RP2040 dual Cort
 
 ### Static Memory Footprint
 
-Measured on release library build (`gcc 13.3.0 -O3 -DNDEBUG`):
+Measured on release library build inside the Nix dev shell (`clang 21.1.8 -O3 -DNDEBUG`, x86_64):
 
 ```text
 --- Binary Footprint (size libcfuture.a) ---
    text    data     bss     dec     hex filename
-   5368       0       0    5368    14f8 cfuture.c.o
-    249       0       0     249      f9 cfuture_pal.c.o
-    153       0       0     153      99 cfuture_polling.c.o
-   1609      48   12329   13986    36a2 cfuture_posix.c.o
+   4160       0       8    4168    1048 cfuture.c.o
+    218       0       0     218      da cfuture_pal.c.o
+    117       0       0     117      75 cfuture_polling.c.o
+   1142      48   12337   13527    34d7 cfuture_posix.c.o
 ```
 
-- **Core ROM Footprint**: **5,368 bytes** (5,617 bytes including PAL, < 6 KB).
-- **Mutable Global RAM (`.data` / `.bss`)**: **0 bytes**.
+- **Core ROM Footprint**: **4,160 bytes** (4,378 bytes including PAL, < 5 KB).
+- **Mutable Global RAM (`.data` / `.bss`)**: **one `uint_fast32_t`** in the core (8 bytes on this 64-bit host, 4 bytes on Cortex-M): the pool-init epoch counter that gives every pool life a different starting generation. All pool, slot and payload storage is caller-provided. The POSIX adapter's static event table is host-only.
 - **Dynamic Heap Memory (`malloc`/`free`)**: **0 bytes** (Audited via `nm`).
 
 ---
