@@ -2,7 +2,8 @@
 """
 build.py - Convenience Build, Test, Benchmark, and Quality Automation Script for libcfuture.
 
-Supports Linux, macOS, and Windows environments.
+Supports Linux, macOS, and Windows environments. The reference toolchain is the Nix dev
+shell (`nix develop -c python3 build.py --all`); the figures quoted in README.md come from it.
 """
 
 import argparse
@@ -222,6 +223,12 @@ def run_docs_check(build_dir="build"):
     for func in sorted(set(re.findall(r"\b((?:cfuture|cpromise)_[a-z_]+)\s*\(", api))):
         if not re.search(r"\b" + re.escape(func) + r"\b", readme):
             problems.append(f"public function '{func}' is not mentioned in README")
+
+    # Mechanisms the code no longer has must not linger in the docs.
+    for stale in (r"ref_?count", r"reference[- ]count", r"\bRC ?= ?\d"):
+        for match in re.finditer(stale, readme, flags=re.IGNORECASE):
+            line_no = readme.count("\n", 0, match.start()) + 1
+            problems.append(f"README line {line_no} still says '{match.group(0)}' (slots use hold bits)")
 
     # Test suites: each file listed, and the stated suite count correct.
     suites = sorted(glob.glob(os.path.join(SCRIPT_DIR, "tests", "test_*.cpp")))
