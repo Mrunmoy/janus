@@ -2,7 +2,11 @@
  * @file bench_throughput.cpp
  * @brief Micro-Benchmarks for cfuture Creation and Fulfillment Latency
  *
- * Measures nanoseconds per allocation, fulfill, and wait operation.
+ * Measures the uncontended, single-threaded call overhead of two composite cycles, once
+ * with the POSIX event backend and once in polling mode:
+ *   - create -> abandon -> drop
+ *   - create -> set_value -> wait_for (the value is already there, so nothing blocks)
+ * These are API call costs, not wake-up latencies.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -14,31 +18,39 @@
 #include <iomanip>
 #include <iostream>
 
-int main()
+namespace
 {
-    constexpr uint32_t kCapacity = 32;
-    constexpr uint32_t kIterations = 100000;
 
+constexpr uint32_t kCapacity = 32;
+constexpr uint32_t kIterations = 100000;
+
+void report(const char *label, std::chrono::steady_clock::time_point start)
+{
+    const int64_t duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - start)
+                                    .count();
+    const double ns_per_op = static_cast<double>(duration_ns) / kIterations;
+    std::cout << "  " << label << ": " << std::fixed << std::setprecision(1) << ns_per_op
+              << " ns/op (" << static_cast<uint64_t>(1e9 / ns_per_op) << " ops/sec)\n";
+}
+
+int runMode(const char *mode, const cfuture_sync_ops_t *ops)
+{
     cfuture_slot_t slots[kCapacity]{};
     uint32_t payload_arena[kCapacity]{};
     cfuture_pool_t pool{};
 
-    const cfuture_sync_ops_t *posix_ops = cfuture_posix_sync_ops();
     if (!cfuture_pool_init(&pool, kCapacity, sizeof(uint32_t), slots,
-                           reinterpret_cast<uint8_t *>(payload_arena), posix_ops))
+                           reinterpret_cast<uint8_t *>(payload_arena), ops))
     {
         std::cerr << "Failed to initialize pool\n";
         return 1;
     }
 
-    std::cout << "====================================================\n";
-    std::cout << "  libcfuture Micro-Benchmark (Iterations: " << kIterations << ")\n";
-    std::cout << "====================================================\n";
+    std::cout << "  [" << mode << "]\n";
 
-    // 1. Benchmark: Pure Allocation & Immediate Release
     {
-        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-
+        const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
         for (uint32_t i = 0; i < kIterations; ++i)
         {
             cpromise_t p{};
@@ -49,21 +61,11 @@ int main()
                 cpromise_drop(&p, 0);
             }
         }
-
-        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-        int64_t duration_ns =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
-        double ns_per_op = static_cast<double>(duration_ns) / kIterations;
-        double ops_per_sec = (1e9 / ns_per_op);
-
-        std::cout << "  Allocation + Drop Cycle: " << std::fixed << std::setprecision(1)
-                  << ns_per_op << " ns/op (" << static_cast<uint64_t>(ops_per_sec) << " ops/sec)\n";
+        report("Create -> Abandon -> Drop Cycle", start);
     }
 
-    // 2. Benchmark: Full Synchronous Create -> Fulfill -> Wait -> Recycle Cycle
     {
-        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-
+        const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
         for (uint32_t i = 0; i < kIterations; ++i)
         {
             cpromise_t p{};
@@ -74,22 +76,28 @@ int main()
                 cpromise_set_value(&p, &val, 0);
 
                 uint32_t out_val = 0;
-                cfuture_wait_for(&f, 10, &out_val, nullptr);
+                (void)cfuture_wait_for(&f, 10, &out_val, nullptr);
             }
         }
-
-        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-        int64_t duration_ns =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
-        double ns_per_op = static_cast<double>(duration_ns) / kIterations;
-        double ops_per_sec = (1e9 / ns_per_op);
-
-        std::cout << "  Complete Roundtrip Cycle: " << std::fixed << std::setprecision(1)
-                  << ns_per_op << " ns/op (" << static_cast<uint64_t>(ops_per_sec) << " ops/sec)\n";
+        report("Create -> Fulfill -> Wait Cycle", start);
     }
-
-    std::cout << "====================================================\n";
 
     cfuture_pool_destroy(&pool);
     return 0;
+}
+
+} // namespace
+
+int main()
+{
+    std::cout << "====================================================\n";
+    std::cout << "  libcfuture Micro-Benchmark (Iterations: " << kIterations << ")\n";
+    std::cout << "  Uncontended single-thread call overhead; nothing blocks.\n";
+    std::cout << "====================================================\n";
+
+    int rc = runMode("POSIX event backend", cfuture_posix_sync_ops());
+    rc |= runMode("Polling mode (no OSAL events)", nullptr);
+
+    std::cout << "====================================================\n";
+    return rc;
 }

@@ -2,3 +2,6 @@
 add_executable(sensor_pipeline sensor_pipeline.c)
 target_link_libraries(sensor_pipeline PRIVATE cfuture)
 set_target_properties(sensor_pipeline PROPERTIES C_STANDARD 11)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(sensor_pipeline PRIVATE -Wall -Wextra -Werror -pedantic)
+endif()

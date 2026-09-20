@@ -188,7 +188,7 @@ def run_lint():
     if shutil.which("clang-format"):
         log_info("Running clang-format dry-run check...")
         run_cmd(
-            "clang-format --dry-run --Werror src/*.c src/adapters/*.c include/*.h include/adapters/*.h tests/*.cpp benchmarks/*.cpp"
+            "clang-format --dry-run --Werror src/*.c src/adapters/*.c include/*.h include/adapters/*.h tests/*.cpp tests/*.hpp benchmarks/*.cpp examples/*.c"
         )
         log_success("clang-format check passed.")
     else:
@@ -236,6 +236,18 @@ def run_docs_check(build_dir="build"):
             line_no = readme.count("\n", 0, block.start() + block.group(0).index("#")) + 1
             problems.append(f"README line {line_no}: '#' inside a mermaid block truncates the label")
 
+    # Every in-page link must point at a real heading (GitHub slug rules).
+    def slug(heading):
+        text = re.sub(r"[`*]", "", heading.strip().lower())
+        text = re.sub(r"[^a-z0-9_ \-]", "", text)
+        return text.replace(" ", "-")
+
+    body = re.sub(r"```.*?```", "", readme, flags=re.S)
+    slugs = {slug(h) for h in re.findall(r"^#{1,6} +(.+)$", body, flags=re.M)}
+    for anchor in sorted(set(re.findall(r"\]\(#([^)]+)\)", body))):
+        if anchor not in slugs:
+            problems.append(f"README links to '#{anchor}', which matches no heading")
+
     # Test suites: each file listed, and the stated suite count correct.
     suites = sorted(glob.glob(os.path.join(SCRIPT_DIR, "tests", "test_*.cpp")))
     for path in suites:
@@ -260,14 +272,19 @@ def run_docs_check(build_dir="build"):
     lib = os.path.join(SCRIPT_DIR, build_dir, "libcfuture.a")
     if shutil.which("size") and os.path.exists(lib):
         out = subprocess.run(["size", lib], capture_output=True, text=True, check=False).stdout
+        compared = 0
         for line in out.splitlines()[1:]:
             parts = line.split()
             if len(parts) >= 6 and parts[5] in ("cfuture.c.o", "cfuture_pal.c.o"):
                 text, _data, bss = parts[0], parts[1], parts[2]
+                compared += 1
                 if not re.search(rf"\b{text}\s+\d+\s+{bss}\s+\d+\s+\w+\s+{re.escape(parts[5])}", readme):
                     problems.append(
                         f"README footprint row for {parts[5]} is stale (now text={text} bss={bss})"
                     )
+        if compared != 2:
+            # Only GNU binutils `size` lists archive members in this column layout.
+            log_warn("'size' output not in GNU per-member format; footprint table NOT checked.")
     else:
         log_warn("libcfuture.a or 'size' not found; skipping footprint comparison.")
 
