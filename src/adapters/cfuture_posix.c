@@ -16,6 +16,14 @@
 
 #define CFUTURE_POSIX_MAX_SPURIOUS_WAKEUPS ((uint32_t)1000U)
 
+/* Deadlines must not move when the wall clock is stepped (NTP, settimeofday), so the
+ * condvars are bound to CLOCK_MONOTONIC. macOS has no pthread_condattr_setclock. */
+#if defined(__APPLE__)
+#define CFUTURE_POSIX_WAIT_CLOCK CLOCK_REALTIME
+#else
+#define CFUTURE_POSIX_WAIT_CLOCK CLOCK_MONOTONIC
+#endif
+
 typedef struct
 {
     pthread_mutex_t mutex;
@@ -35,14 +43,21 @@ static void cfuture_posix_ensure_init(void)
 {
     if (!s_initialized)
     {
+        pthread_condattr_t cond_attr;
+        pthread_condattr_init(&cond_attr);
+#if !defined(__APPLE__)
+        pthread_condattr_setclock(&cond_attr, CFUTURE_POSIX_WAIT_CLOCK);
+#endif
+
         for (uint32_t i = 0; i < CFUTURE_POSIX_MAX_EVENTS; ++i)
         {
             pthread_mutex_init(&s_events[i].mutex, NULL);
-            pthread_cond_init(&s_events[i].cond, NULL);
+            pthread_cond_init(&s_events[i].cond, &cond_attr);
             s_events[i].signaled = false;
             s_events[i].in_use = false;
         }
 
+        pthread_condattr_destroy(&cond_attr);
         s_initialized = true;
     }
 }
@@ -56,7 +71,7 @@ static void cfuture_posix_ensure_init(void)
 static struct timespec cfuture_posix_calc_deadline(uint32_t timeout_ms)
 {
     struct timespec ts = {0};
-    clock_gettime(CLOCK_REALTIME, &ts);
+    clock_gettime(CFUTURE_POSIX_WAIT_CLOCK, &ts);
 
     ts.tv_sec += (time_t)(timeout_ms / 1000U);
     ts.tv_nsec += (long)((timeout_ms % 1000U) * 1000000UL);
@@ -179,11 +194,22 @@ static bool posix_event_wait(void *event_handle, uint32_t timeout_ms)
         return false;
     }
 
-    /* Fallback default deadline if waiting indefinitely: 10 minutes max */
-    uint32_t effective_ms = (timeout_ms == UINT32_MAX) ? 600000U : timeout_ms;
-    struct timespec ts = cfuture_posix_calc_deadline(effective_ms);
-
-    bool success = cfuture_posix_timed_wait_loop(ev, &ts);
+    bool success = false;
+    if (timeout_ms == UINT32_MAX)
+    {
+        /* Forever means forever: the predicate loop absorbs spurious wakeups. */
+        while (!ev->signaled)
+        {
+            pthread_cond_wait(&ev->cond, &ev->mutex);
+        }
+        ev->signaled = false;
+        success = true;
+    }
+    else
+    {
+        struct timespec ts = cfuture_posix_calc_deadline(timeout_ms);
+        success = cfuture_posix_timed_wait_loop(ev, &ts);
+    }
 
     pthread_mutex_unlock(&ev->mutex);
     return success;
