@@ -9,21 +9,21 @@ A small future/promise utility for C firmware that does not use a heap.
 
 ## Table of Contents
 
-- [1. Who was Janus?](#1-who-was-janus)
-- [2. The same two faces in software](#2-the-same-two-faces-in-software)
-- [3. Why not just use that in firmware?](#3-why-not-just-use-that-in-firmware)
-- [4. How it works, in plain terms](#4-how-it-works-in-plain-terms)
-- [5. The problems it addresses](#5-the-problems-it-addresses)
+- [1. Janus](#1-janus)
+- [2. Future and promise](#2-future-and-promise)
+- [3. Firmware without a heap](#3-firmware-without-a-heap)
+- [4. How it works](#4-how-it-works)
+- [5. The problems in detail](#5-the-problems-in-detail)
   - [Problem 1: the reply pointer outlives the caller](#problem-1-the-reply-pointer-outlives-the-caller)
   - [Problem 2: a slot is reused while its request is still queued](#problem-2-a-slot-is-reused-while-its-request-is-still-queued)
   - [Problem 3: work that nobody is waiting for](#problem-3-work-that-nobody-is-waiting-for)
-- [6. How it is built](#6-how-it-is-built)
+- [6. Design](#6-design)
   - [Layers](#layers)
   - [Two holds per slot](#two-holds-per-slot)
   - [Claiming a slot](#claiming-a-slot)
   - [Platform Abstraction Layer (PAL - `cfuture_pal.h`)](#platform-abstraction-layer-pal---cfuture_palh)
-  - [Plugging in your RTOS (`cfuture_sync_ops_t`)](#plugging-in-your-rtos-cfuture_sync_ops_t)
-  - [Fulfilment from Interrupt Context](#fulfilment-from-interrupt-context)
+  - [RTOS integration (`cfuture_sync_ops_t`)](#rtos-integration-cfuture_sync_ops_t)
+  - [Interrupt context](#interrupt-context)
   - [Typed wrappers](#typed-wrappers)
 - [7. States and transitions](#7-states-and-transitions)
   - [State diagram](#state-diagram)
@@ -54,18 +54,18 @@ A small future/promise utility for C firmware that does not use a heap.
   - [Multi-Core Payload Publication](#multi-core-payload-publication)
 - [12. Repository layout](#12-repository-layout)
 - [13. Getting started](#13-getting-started)
-  - [Get the code](#get-the-code)
+  - [Clone](#clone)
   - [Dependencies](#dependencies)
   - [Build and run the tests](#build-and-run-the-tests)
-  - [Using it in your own project](#using-it-in-your-own-project)
+  - [Integration](#integration)
 - [14. Usage examples](#14-usage-examples)
-  - [The smallest useful example](#the-smallest-useful-example)
-  - [A servicer task and a requester with a deadline](#a-servicer-task-and-a-requester-with-a-deadline)
-  - [Fulfilling a promise from an interrupt handler](#fulfilling-a-promise-from-an-interrupt-handler)
-- [15. Building and testing](#15-building-and-testing)
+  - [Minimal example](#minimal-example)
+  - [Servicer task and requester with a deadline](#servicer-task-and-requester-with-a-deadline)
+  - [Interrupt handler](#interrupt-handler)
+- [15. Build tooling](#15-build-tooling)
   - [CLI Reference](#cli-reference)
   - [Nix development shell](#nix-development-shell)
-- [16. How it is tested](#16-how-it-is-tested)
+- [16. Testing](#16-testing)
   - [Test suites](#test-suites)
   - [Sanitizer runs](#sanitizer-runs)
   - [Static Analysis & Code Style](#static-analysis--code-style)
@@ -76,7 +76,7 @@ A small future/promise utility for C firmware that does not use a heap.
 
 ---
 
-## 1. Who was Janus?
+## 1. Janus
 
 In Roman religion, [Janus](https://en.wikipedia.org/wiki/Janus) is the god of beginnings, gates, transitions, doorways, passages and endings. He is usually shown with a double-sided head: one face turned toward what has already happened, the other toward what is still to come. The month of January is named for him, and the gates of his temple in Rome stood open in time of war and were closed to mark the arrival of peace.
 
@@ -84,7 +84,7 @@ He is a fitting patron for a doorway, because a doorway is one thing seen from t
 
 ---
 
-## 2. The same two faces in software
+## 2. Future and promise
 
 Programs have doorways like that too. One task asks another to do something slow: write a flash sector, read a sensor, talk to a radio. From that moment there are two views of the same piece of work:
 
@@ -95,7 +95,7 @@ C++ gives these two views names. `std::promise` is the side that owes the answer
 
 ---
 
-## 3. Why not just use that in firmware?
+## 3. Firmware without a heap
 
 That shared state lives on the heap, and the C++ library machinery around it expects exceptions and a runtime. A lot of embedded code is plain C, and much of it avoids dynamic allocation on purpose: a heap can fragment, an allocation can fail at an awkward moment, and the time it takes is hard to bound.
 
@@ -107,7 +107,7 @@ Janus is an attempt at the smallest utility that gives C firmware the two-faced 
 
 ---
 
-## 4. How it works, in plain terms
+## 4. How it works
 
 Picture a short row of numbered pigeonholes on the wall, the kind a hotel keeps behind the front desk. The row is ordinary static memory that you declare yourself; its length is fixed when you build.
 
@@ -124,7 +124,7 @@ The "bell" is whatever your system offers: an RTOS event or semaphore that you p
 
 ---
 
-## 5. The problems it addresses
+## 5. The problems in detail
 
 This section looks more closely at the situations sketched above. Throughout, $T_S$ is a *servicer* task that owns a slow shared resource (flash, an SD card, a sensor bus, a radio) and takes commands from an RTOS queue, and $T_A$, $T_B$ are *requester* tasks that send it work and wait for the result with a deadline.
 
@@ -134,11 +134,11 @@ To avoid dynamic memory allocation, a requester task $T_A$ often allocates its r
 
 ```c
 // BROKEN PATTERN: Stack-allocated response pointer
-void record_audio_block(const uint8_t *pcm_data)
+void save_calibration(const uint8_t *calibration)
 {
     storage_response_t response; // Allocated on T_A's stack frame
     storage_request_t req = {
-        .payload = pcm_data,
+        .payload = calibration,
         .reply_ptr = &response   // Dangerous pointer passed to T_S
     };
 
@@ -147,7 +147,7 @@ void record_audio_block(const uint8_t *pcm_data)
     // Block with 50 ms timeout
     if (!os_event_wait(g_event_handle, 50))
     {
-        // TIMEOUT! Function returns immediately.
+        // Timed out: the function returns immediately.
         // T_A's stack frame is unwound and reclaimed by the CPU.
         return;
     }
@@ -164,7 +164,7 @@ void record_audio_block(const uint8_t *pcm_data)
 To eliminate stack pointers, developers introduce a static pool of pre-allocated request slots. However, handing the slot back too early creates a time-of-check to time-of-use race:
 
 ```text
-Time   Task T_A (Audio)             OS Storage Queue           Task T_B (Telemetry)        Task T_S (Storage Servicer)
+Time   Task T_A (Logger)            OS Storage Queue           Task T_B (Telemetry)        Task T_S (Storage Servicer)
  │
  ├───> Claims Slot #2 from pool
  ├───> Posts Slot #2 pointer ─────> [ Slot #2 ]
@@ -194,7 +194,7 @@ When an operation takes longer than the caller can tolerate, the servicer requir
 
 ---
 
-## 6. How it is built
+## 6. Design
 
 The pigeonholes, tickets and bell from section 4, now with their real names. A pigeonhole is a *slot*, a ticket is a *handle*, handing a ticket in is *releasing a hold*, and the serial number is the *generation*.
 
@@ -205,7 +205,7 @@ Dependencies point one way only. The core library depends on no operating system
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ LAYER 1: CLIENT APPLICATION & SERVICER THREADS                              │
-│ Audio Streamer Task (T_A) │ Telemetry Task (T_B) │ Storage Task (T_S)       │
+│ Data Logger Task (T_A)    │ Telemetry Task (T_B) │ Storage Task (T_S)       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ LAYER 2: TYPE-SAFE SUBSYSTEM WRAPPERS                                       │
 │ CFUTURE_DEFINE_STATIC_BUFFERS() │ CFUTURE_DEFINE_TYPED_POOL() Macros        │
@@ -248,12 +248,12 @@ graph TD
     RC2 -->|cfuture_cancel on an Undispatched Pair| RC0
 ```
 
-#### Why a timed-out slot is not handed to someone else
+#### Slot reuse after a timeout
 When task $T_A$ times out, it clears only its own consumer hold; the producer hold is still set. The slot is not recycled back to the pool. Because its bit remains set in `allocated_mask`, concurrent task $T_B$ **cannot claim this slot**. 
 
 Only when servicer task $T_S$ pops $T_A$'s request from the queue and releases the producer hold is the last hold gone. The final owner performs the slot recycling, so a slot cannot be reused while its producer hold is set. The one exception is a successful `cfuture_cancel()`, which recycles the slot at once; a promise copy still sitting in a queue is then rejected by its generation tag instead.
 
-#### Serial numbers on the tickets: generations and claims
+#### Generations and claims
 Handles are plain structs and get copied (into queue messages, retry paths, ISR contexts), so the library also defends against a handle that is used twice or outlives its slot:
 
 - **Generation tag**: the `owner` word is `(generation << CFUTURE_GEN_SHIFT) | hold bits`. Every recycle bumps the generation (wrapping at `CFUTURE_GEN_MASK` and skipping 0, which is never valid). `cfuture_t` / `cpromise_t` carry the generation they were created with.
@@ -315,7 +315,7 @@ For hardware-level clock timing and instruction pipeline relaxation, `libcfuture
 
 ---
 
-### Plugging in your RTOS (`cfuture_sync_ops_t`)
+### RTOS integration (`cfuture_sync_ops_t`)
 
 The core (`cfuture.c`) contains zero OS `#ifdef` preprocessor directives; OS differences live only in the PAL and the adapters. Platform synchronization primitives are injected dynamically through a function pointer structure:
 
@@ -343,7 +343,7 @@ This permits testing identical embedded business logic on host developer worksta
 
 ---
 
-### Fulfilment from Interrupt Context
+### Interrupt context
 
 Fulfilling a promise directly from a hardware interrupt service routine (e.g., DMA transfer complete, Timer capture, UART RX idle line) is supported via `cpromise_set_value_from_isr()`:
 - The core path is a bounded CAS, a bounded `memcpy` and no blocking call; whether the signal itself is ISR-safe is the adapter's responsibility.
@@ -837,7 +837,7 @@ ARMv6-M (Cortex-M0/M0+) has no LDREX/STREX, so the compiler cannot inline the li
 
 ## 13. Getting started
 
-### Get the code
+### Clone
 
 ```bash
 git clone https://github.com/Mrunmoy/janus.git
@@ -864,7 +864,7 @@ python3 build.py --test      # run the test suites
 
 Inside Nix the whole pipeline is one command: `nix develop -c python3 build.py --all`.
 
-### Using it in your own project
+### Integration
 
 As a CMake subdirectory (for example as a git submodule). The library's own tests, benchmark and example are switched off automatically when it is not the top-level project:
 
@@ -879,7 +879,7 @@ Or without CMake: compile `src/cfuture.c` and `src/cfuture_pal.c`, add `include/
 
 ## 14. Usage examples
 
-### The smallest useful example
+### Minimal example
 
 No RTOS and no event backend: passing `NULL` selects polling mode. `hand_to_worker()` stands for however your system passes a small struct to another task.
 
@@ -929,7 +929,7 @@ If `read_temperature()` gives up after 50 ms and the worker answers later, the l
 
 ---
 
-### A servicer task and a requester with a deadline
+### Servicer task and requester with a deadline
 
 A fuller example: one storage servicer task taking commands from an OS queue, and a requester that gives up after a deadline. `os_queue_*`, `hardware_flash_write_sector()` and `calculate_crc32()` stand for whatever your system provides.
 
@@ -996,8 +996,8 @@ void storage_servicer_task_loop(void *queue_handle)
     }
 }
 
-// --- Audio Recorder Requester Task (T_A) ---
-bool save_audio_sample_safe(uint32_t sector, const uint8_t *data, uint32_t timeout_ms)
+// --- Data Logger Requester Task (T_A) ---
+bool save_log_block(uint32_t sector, const uint8_t *data, uint32_t timeout_ms)
 {
     cpromise_t promise;
     cfuture_t future;
@@ -1041,7 +1041,7 @@ bool save_audio_sample_safe(uint32_t sector, const uint8_t *data, uint32_t timeo
 
 ---
 
-### Fulfilling a promise from an interrupt handler
+### Interrupt handler
 
 ```c
 static cpromise_t g_active_dma_promise;
@@ -1063,7 +1063,7 @@ void DMA2_Stream0_IRQHandler(void)
 
 ---
 
-## 15. Building and testing
+## 15. Build tooling
 
 A Python build driver (`build.py`) wraps CMake/CTest. It is written to be portable, but it is only exercised on Linux inside the Nix shell:
 
@@ -1104,7 +1104,7 @@ nix develop -c python3 build.py --all
 
 ---
 
-## 16. How it is tested
+## 16. Testing
 
 What the tests in this repository cover, and just as importantly what they do not.
 
