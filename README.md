@@ -1,47 +1,39 @@
-# libcfuture
+# Janus (`libcfuture`)
 
-> **Zero-Heap, Lock-Free C11 Future/Promise Concurrency Framework for Embedded Firmware & High-Performance Systems**
+A small future/promise utility for C firmware that does not use a heap.
 
-[![Language: C11](https://img.shields.io/badge/Language-C11%20(ISO%2FIEC%209899%3A2011)-00599C.svg)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
-[![Dynamic Allocations: 0 Bytes](https://img.shields.io/badge/Dynamic%20Allocations-0%20Bytes%20(Zero--Heap)-brightgreen.svg)]()
-[![Concurrency: Lock--Free](https://img.shields.io/badge/Concurrency-Lock--Free%20Bitmask%20CAS-blueviolet.svg)]()
-[![Line Coverage: 97.9%](https://img.shields.io/badge/Line%20Coverage-97.9%25%20(Linux%20host)-brightgreen.svg)]()
-[![ThreadSanitizer: suite passes](https://img.shields.io/badge/ThreadSanitizer-suite%20passes%20(Linux%20host)-success.svg)]()
-[![ASan & UBSan: suite passes](https://img.shields.io/badge/ASan%20%7C%20UBSan-suite%20passes%20(Linux%20host)-success.svg)]()
-[![Core code size: 1.7 KB on Cortex-M4](https://img.shields.io/badge/Core%20code-1.7%20KB%20(Cortex--M4%20--Os)-orange.svg)]()
-[![Library static RAM: 2 words on Cortex-M](https://img.shields.io/badge/Library%20static%20RAM-2%20words%20(Cortex--M)-blue.svg)]()
+[![Language: C11](https://img.shields.io/badge/Language-C11-00599C.svg)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
-`libcfuture` is a zero-heap, lock-free future/promise library written in C11 (plus a few compiler builtins: `__builtin_ctz` / `_BitScanForward`, weak symbols, and one inline `yield`). It targets embedded firmware and host systems, and provides asynchronous request-response between threads and Interrupt Service Routines (ISRs) without dynamic memory allocation or dangling stack pointers. The core takes no locks and every loop in it is bounded; whether a wait can suffer priority inversion depends on the injected OSAL backend (see [Polling mode](#atomic-polling-adapter-bare-metal--no-os)).
-
-The library eliminates the three classical failure modes of embedded asynchronous queueing: **dangling stack pointer corruption** upon requester timeout, **Queue ABA slot collisions (TOCTOU races)** under rapid turnover, and **uncontrolled peripheral execution** for abandoned requests.
 
 ---
 
 ## Table of Contents
 
-- [1. Executive Summary](#1-executive-summary)
-- [2. Concurrency Hazards in Naive Embedded Queueing](#2-concurrency-hazards-in-naive-embedded-queueing)
-  - [Hazard 1: The Dangling Stack Pointer Corruption](#hazard-1-the-dangling-stack-pointer-corruption)
-  - [Hazard 2: The Queue ABA Reallocation Hazard (TOCTOU Race)](#hazard-2-the-queue-aba-reallocation-hazard-toctou-race)
-  - [Hazard 3: Wasted Peripheral Work & Missing Cancellation](#hazard-3-wasted-peripheral-work--missing-cancellation)
-- [3. System Architecture & Core Design Principles](#3-system-architecture--core-design-principles)
-  - [Architectural Layers](#architectural-layers)
-  - [Dual-Owner Hold Protocol](#dual-owner-hold-protocol)
-  - [Bounded-Time Bitmask CAS Allocation](#bounded-time-bitmask-cas-allocation)
+- [1. Who was Janus?](#1-who-was-janus)
+- [2. The same two faces in software](#2-the-same-two-faces-in-software)
+- [3. Why not just use that in firmware?](#3-why-not-just-use-that-in-firmware)
+- [4. How it works, in plain terms](#4-how-it-works-in-plain-terms)
+- [5. The problems it addresses](#5-the-problems-it-addresses)
+  - [Problem 1: the reply pointer outlives the caller](#problem-1-the-reply-pointer-outlives-the-caller)
+  - [Problem 2: a slot is reused while its request is still queued](#problem-2-a-slot-is-reused-while-its-request-is-still-queued)
+  - [Problem 3: work that nobody is waiting for](#problem-3-work-that-nobody-is-waiting-for)
+- [6. How it is built](#6-how-it-is-built)
+  - [Layers](#layers)
+  - [Two holds per slot](#two-holds-per-slot)
+  - [Claiming a slot](#claiming-a-slot)
   - [Platform Abstraction Layer (PAL - `cfuture_pal.h`)](#platform-abstraction-layer-pal---cfuture_palh)
-  - [Dependency Injection OSAL (`cfuture_sync_ops_t`)](#dependency-injection-osal-cfuture_sync_ops_t)
+  - [Plugging in your RTOS (`cfuture_sync_ops_t`)](#plugging-in-your-rtos-cfuture_sync_ops_t)
   - [Fulfilment from Interrupt Context](#fulfilment-from-interrupt-context)
-  - [Type Safety Without `void*` Casting](#type-safety-without-void-casting)
-- [4. Finite State Machine & Concurrency Mechanics](#4-finite-state-machine--concurrency-mechanics)
-  - [State Transition Diagram](#state-transition-diagram)
-  - [State Transition Truth Table](#state-transition-truth-table)
-- [5. Asynchronous Concurrency Workflows](#5-asynchronous-concurrency-workflows)
+  - [Typed wrappers](#typed-wrappers)
+- [7. States and transitions](#7-states-and-transitions)
+  - [State diagram](#state-diagram)
+  - [Transition table](#transition-table)
+- [8. Workflows](#8-workflows)
   - [Workflow 1: Pipelined Servicer Dispatch (Happy Path)](#workflow-1-pipelined-servicer-dispatch-happy-path)
-  - [Workflow 2: Timeout, Cancellation & Slot Isolation (ABA Prevention)](#workflow-2-timeout-cancellation--slot-isolation-aba-prevention)
+  - [Workflow 2: Timeout, Cancellation & Slot Isolation](#workflow-2-timeout-cancellation--slot-isolation)
   - [Workflow 3: Late Completion Discard (Worker Completes After Timeout)](#workflow-3-late-completion-discard-worker-completes-after-timeout)
   - [Workflow 4: Hardware Interrupt (ISR) Promise Fulfillment](#workflow-4-hardware-interrupt-isr-promise-fulfillment)
-- [6. API Reference & Functional Specification](#6-api-reference--functional-specification)
+- [9. API reference](#9-api-reference)
   - [Status and Error Codes](#status-and-error-codes)
   - [Pool Management](#pool-management)
   - [Future & Promise Creation](#future--promise-creation)
@@ -50,55 +42,93 @@ The library eliminates the three classical failure modes of embedded asynchronou
   - [Platform Abstraction Layer (PAL) Primitives](#platform-abstraction-layer-pal-primitives)
   - [Synchronization Provider Contract (OSAL)](#synchronization-provider-contract-osal)
   - [Typed Pool Static Generators](#typed-pool-static-generators)
-- [7. Canonical Implementation Walkthrough](#7-canonical-implementation-walkthrough)
-  - [Shared Servicer Pipeline (Flash Storage & Audio Tasks)](#shared-servicer-pipeline-flash-storage--audio-tasks)
-  - [DMA Interrupt Service Routine Completion](#dma-interrupt-service-routine-completion)
-- [8. Platform Support & Adapter Matrix](#8-platform-support--adapter-matrix)
-  - [Target Platform Comparison](#target-platform-comparison)
+- [10. Platforms and adapters](#10-platforms-and-adapters)
+  - [Adapters at a glance](#adapters-at-a-glance)
   - [Native POSIX Adapter (Linux / macOS)](#native-posix-adapter-linux--macos)
   - [Native Win32 Adapter (Windows)](#native-win32-adapter-windows)
   - [Atomic Polling Adapter (Bare-Metal / No-OS)](#atomic-polling-adapter-bare-metal--no-os)
   - [RTOS Targets (FreeRTOS, ThreadX, Zephyr)](#rtos-targets-freertos-threadx-zephyr)
-- [9. Microcontroller Porting & Silicon Guidelines](#9-microcontroller-porting--silicon-guidelines)
+- [11. Porting notes](#11-porting-notes)
   - [Data Cache and DMA (Cortex-M7 / M55 / M85)](#data-cache-and-dma-cortex-m7--m55--m85)
   - [Cortex-M0/M0+ Atomics](#cortex-m0m0-atomics)
   - [Multi-Core Payload Publication](#multi-core-payload-publication)
-- [10. Memory Footprint & Benchmark Telemetry](#10-memory-footprint--benchmark-telemetry)
-  - [Static Memory Footprint](#static-memory-footprint)
-  - [Latency & Throughput Benchmarks](#latency--throughput-benchmarks)
-- [11. Verification, Testing & Static Analysis](#11-verification-testing--static-analysis)
-  - [GoogleTest Test Suite Matrix](#googletest-test-suite-matrix)
-  - [Sanitizer Verification (TSan, ASan, UBSan)](#sanitizer-verification-tsan-asan-ubsan)
-  - [Static Analysis & Code Style](#static-analysis--code-style)
-- [12. Build Automation & Tooling (`build.py`)](#12-build-automation--tooling-buildpy)
+- [12. Repository layout](#12-repository-layout)
+- [13. Getting started](#13-getting-started)
+  - [Get the code](#get-the-code)
+  - [Dependencies](#dependencies)
+  - [Build and run the tests](#build-and-run-the-tests)
+  - [Using it in your own project](#using-it-in-your-own-project)
+- [14. Usage examples](#14-usage-examples)
+  - [The smallest useful example](#the-smallest-useful-example)
+  - [A servicer task and a requester with a deadline](#a-servicer-task-and-a-requester-with-a-deadline)
+  - [Fulfilling a promise from an interrupt handler](#fulfilling-a-promise-from-an-interrupt-handler)
+- [15. Building and testing](#15-building-and-testing)
   - [CLI Reference](#cli-reference)
-  - [Hermetic Nix Development Environment](#hermetic-nix-development-environment)
-- [13. Repository Layout & File Taxonomy](#13-repository-layout--file-taxonomy)
-- [14. License](#14-license)
+  - [Nix development shell](#nix-development-shell)
+- [16. How it is tested](#16-how-it-is-tested)
+  - [Test suites](#test-suites)
+  - [Sanitizer runs](#sanitizer-runs)
+  - [Static Analysis & Code Style](#static-analysis--code-style)
+- [17. Performance](#17-performance)
+  - [Code and data size](#code-and-data-size)
+  - [Call overhead](#call-overhead)
+- [18. License](#18-license)
 
 ---
 
-## 1. Executive Summary
+## 1. Who was Janus?
 
-In multi-threaded embedded architectures (FreeRTOS, ThreadX, Zephyr, or bare-metal super-loops), workloads are fundamentally divided into **Servicer Tasks ($T_S$)** and **Requester Tasks ($T_A, T_B, \dots$)**:
-- **Shared Servicer Task ($T_S$)**: Controls a shared, high-latency physical resource (e.g., QSPI NOR Flash, SD Card FatFS, SPI Sensor Bus, Hardware Crypto Engine, or BLE/LoRa Radio). It processes incoming commands sequentially off an operating system message queue.
-- **Requester Tasks ($T_A, T_B$)**: High-level subsystems (e.g., Audio capture, Telemetry aggregation, Motor control loop) that dispatch asynchronous I/O requests to $T_S$ and block waiting for a response within a hard deadline (timeout).
+In Roman religion, [Janus](https://en.wikipedia.org/wiki/Janus) is the god of beginnings, gates, transitions, doorways, passages and endings. He is usually shown with a double-sided head: one face turned toward what has already happened, the other toward what is still to come. The month of January is named for him, and the gates of his temple in Rome stood open in time of war and were closed to mark the arrival of peace.
 
-While standard RTOS queues deliver messages to the servicer, they provide no native mechanism for:
-1. **Returning payloads without dynamic heap allocation** (`malloc`/`free`).
-2. **Safely aborting requests when a caller's timeout expires** before the servicer starts the work.
-3. **Discarding late completions** if the servicer finishes after the caller has already unblocked and resumed execution.
-4. **Preventing slot recycling races** where a timed-out request slot is reassigned to a new caller while the servicer still holds a stale pointer to it.
-
-`libcfuture` addresses these four points using lock-free C11 atomic compare-and-swap (CAS) primitives and a dual-owner hold protocol with generation-tagged handles. It is checked by unit tests, sanitizer runs and randomised multi-threaded stress tests on a Linux host; see [section 11](#11-verification-testing--static-analysis) for exactly what is and is not tested.
+He is a fitting patron for a doorway, because a doorway is one thing seen from two sides.
 
 ---
 
-## 2. Concurrency Hazards in Naive Embedded Queueing
+## 2. The same two faces in software
 
-When firmware developers implement custom request-reply mechanisms over RTOS queues, three lethal concurrency traps routinely surface:
+Programs have doorways like that too. One task asks another to do something slow: write a flash sector, read a sensor, talk to a radio. From that moment there are two views of the same piece of work:
 
-### Hazard 1: The Dangling Stack Pointer Corruption
+- The task that asked is looking **forward**. It is waiting for a result that does not exist yet.
+- The task that does the work is looking **back**. It holds a request that was made earlier, and it owes somebody an answer.
+
+C++ gives these two views names. `std::promise` is the side that owes the answer, `std::future` is the side that waits for it, and the two are joined by a small piece of shared state that outlives whichever side finishes first. The caller can wait with a time limit, give up, and walk away; the worker can still deliver into the shared state later without hurting anyone.
+
+---
+
+## 3. Why not just use that in firmware?
+
+That shared state lives on the heap, and the C++ library machinery around it expects exceptions and a runtime. A lot of embedded code is plain C, and much of it avoids dynamic allocation on purpose: a heap can fragment, an allocation can fail at an awkward moment, and the time it takes is hard to bound.
+
+So firmware usually builds the arrangement by hand. The asking task puts a request on an RTOS queue, includes a pointer to a result variable on its own stack, and blocks on an event with a timeout. That works until the day the timeout fires first. The asking task returns, its stack frame is reused by something else, and a little later the worker writes its answer through a pointer that now points into the middle of someone else's variables.
+
+The obvious repair is a static pool of result slots instead of stack variables. That brings its own trap: if the asking task hands its slot back when it times out, the next task can be given the same slot while the first request is still sitting in the queue.
+
+Janus is an attempt at the smallest utility that gives C firmware the two-faced arrangement without a heap and without those two traps.
+
+---
+
+## 4. How it works, in plain terms
+
+Picture a short row of numbered pigeonholes on the wall, the kind a hotel keeps behind the front desk. The row is ordinary static memory that you declare yourself; its length is fixed when you build.
+
+1. **Asking for a pair.** `cfuture_create()` picks a free pigeonhole and gives you two tickets for it. One ticket is the *future*: you keep it. The other is the *promise*: it travels with your request to whoever will do the work, as a plain value inside your queue message.
+2. **Answering.** When the work is done, the worker hands in its promise ticket together with the answer (`cpromise_set_value()`). The answer is copied into the pigeonhole, never to an address on your stack, and a bell is rung. If the work cannot be done, the worker hands the ticket in without an answer (`cpromise_drop()`).
+3. **Waiting.** `cfuture_wait_for()` stands at the bell with a time limit. If the answer arrives, it is copied out to you. If the time runs out, you simply leave. Nothing of yours is referenced by the worker, so nothing of yours can be overwritten later.
+4. **Giving the pigeonhole back.** A pigeonhole goes back on the free list only when *both* tickets have been handed in. If you left early, it stays reserved until the worker turns up with the promise, finds that nobody is waiting, discards its answer and hands the ticket in. That is what stops the next task from being given a pigeonhole that an old request still points to.
+5. **Old tickets are refused.** Each ticket carries a serial number that changes every time a pigeonhole is reused. A ticket that was copied, used twice, or kept from an earlier round does not open the pigeonhole for its next occupant; the call just does nothing.
+6. **Changing your mind.** If the request never left your hands, for example because the queue was full, `cfuture_cancel()` takes both tickets back in one step.
+
+The worker can ask `cpromise_is_active()` before starting expensive work, and skip it if the asking side has already gone. The answering side can also be an interrupt handler, using the `_from_isr` variants.
+
+The "bell" is whatever your system offers: an RTOS event or semaphore that you plug in through a small table of function pointers, or nothing at all, in which case the waiting side polls. That is the whole idea. The rest of this document fills in the details.
+
+---
+
+## 5. The problems it addresses
+
+This section looks more closely at the situations sketched above. Throughout, $T_S$ is a *servicer* task that owns a slow shared resource (flash, an SD card, a sensor bus, a radio) and takes commands from an RTOS queue, and $T_A$, $T_B$ are *requester* tasks that send it work and wait for the result with a deadline.
+
+### Problem 1: the reply pointer outlives the caller
 
 To avoid dynamic memory allocation, a requester task $T_A$ often allocates its response structure on its local call stack and passes a pointer across the queue:
 
@@ -106,7 +136,7 @@ To avoid dynamic memory allocation, a requester task $T_A$ often allocates its r
 // BROKEN PATTERN: Stack-allocated response pointer
 void record_audio_block(const uint8_t *pcm_data)
 {
-    storage_response_t response; // Allocated on T_A's stack frame!
+    storage_response_t response; // Allocated on T_A's stack frame
     storage_request_t req = {
         .payload = pcm_data,
         .reply_ptr = &response   // Dangerous pointer passed to T_S
@@ -125,13 +155,13 @@ void record_audio_block(const uint8_t *pcm_data)
 }
 ```
 
-**The Catastrophe**: If $T_S$ takes 65 ms (due to a high-priority interrupt storm, flash sector erase, or bus contention), $T_A$ times out and returns. Its stack frame is reused by subsequent function calls. When $T_S$ finishes at 65 ms and executes `*req.reply_ptr = result;`, it **silently writes into the middle of $T_A$'s current, active stack**, corrupting return addresses, saved registers, and local variables. This manifests as random, non-reproducible `HardFault` crashes hours or days later.
+**What goes wrong**: If $T_S$ takes 65 ms (due to a high-priority interrupt storm, flash sector erase, or bus contention), $T_A$ times out and returns. Its stack frame is reused by subsequent function calls. When $T_S$ finishes at 65 ms and executes `*req.reply_ptr = result;`, it **silently writes into the middle of $T_A$'s current, active stack**, corrupting return addresses, saved registers, and local variables. This manifests as random, non-reproducible `HardFault` crashes hours or days later.
 
 ---
 
-### Hazard 2: The Queue ABA Reallocation Hazard (TOCTOU Race)
+### Problem 2: a slot is reused while its request is still queued
 
-To eliminate stack pointers, developers introduce a static pool of pre-allocated request slots. However, naive slot reclamation creates a lethal Time-of-Check to Time-of-Use race:
+To eliminate stack pointers, developers introduce a static pool of pre-allocated request slots. However, handing the slot back too early creates a time-of-check to time-of-use race:
 
 ```text
 Time   Task T_A (Audio)             OS Storage Queue           Task T_B (Telemetry)        Task T_S (Storage Servicer)
@@ -140,23 +170,23 @@ Time   Task T_A (Audio)             OS Storage Queue           Task T_B (Telemet
  ├───> Posts Slot #2 pointer ─────> [ Slot #2 ]
  ├───> Waits with 20ms timeout
  │                                                                                        Busy erasing flash block...
- ├───> 20ms Timeout Expires!
- ├───> T_A frees Slot #2 to pool!
+ ├───> 20ms Timeout Expires
+ ├───> T_A frees Slot #2 to pool
  │                                                                                        Still busy...
- ├───>                              [ Slot #2 ]                Claims Slot #2 from pool!
- │                                                             Writes Telemetry Payload!
- ├───>                              [ Slot #2 ] ─────────────> Posts Slot #2 pointer!
+ ├───>                              [ Slot #2 ]                Claims Slot #2 from pool
+ │                                                             Writes Telemetry Payload
+ ├───>                              [ Slot #2 ] ─────────────> Posts Slot #2 pointer
  │                                                             [ Slot #2 (T_A), Slot #2 (T_B) ]
- │                                                                                        Pops first item: Slot #2!
- │                                                                                        Executes T_A's stale command!
- │                                                                                        CLOBBERS T_B's payload!
+ │                                                                                        Pops first item: Slot #2
+ │                                                                                        Executes T_A's stale command
+ │                                                                                        CLOBBERS T_B's payload
 ```
 
-**The Catastrophe**: Because $T_A$ freed the slot while its request was still queued in the OS message queue, $T_B$ was granted the exact same slot. When $T_S$ eventually services the first queue entry, it operates on $T_B$'s memory under the assumption that it is executing $T_A$'s job. Data from one subsystem overwrites data from an unrelated subsystem with zero compiler or OS warnings.
+**What goes wrong**: Because $T_A$ freed the slot while its request was still queued in the OS message queue, $T_B$ was granted the exact same slot. When $T_S$ eventually services the first queue entry, it operates on $T_B$'s memory under the assumption that it is executing $T_A$'s job. Data from one subsystem overwrites data from an unrelated subsystem with zero compiler or OS warnings.
 
 ---
 
-### Hazard 3: Wasted Peripheral Work & Missing Cancellation
+### Problem 3: work that nobody is waiting for
 
 When an operation takes longer than the caller can tolerate, the servicer requires a race-free mechanism to query request validity:
 - **Pre-Execution Cancellation**: When $T_S$ dequeues a request that sat in the queue for too long, it should check whether the caller has already abandoned it. If abandoned, $T_S$ must skip the peripheral transaction (e.g., avoid an unnecessary 100 ms Flash erase or 50 ms SD card sector write).
@@ -164,11 +194,13 @@ When an operation takes longer than the caller can tolerate, the servicer requir
 
 ---
 
-## 3. System Architecture & Core Design Principles
+## 6. How it is built
 
-### Architectural Layers
+The pigeonholes, tickets and bell from section 4, now with their real names. A pigeonhole is a *slot*, a ticket is a *handle*, handing a ticket in is *releasing a hold*, and the serial number is the *generation*.
 
-`libcfuture` enforces strict unidirectional dependencies. The core library depends on no operating system and no heap; from the toolchain it needs `<stdatomic.h>`, `memcpy`/`memset` and a count-trailing-zeros builtin:
+### Layers
+
+Dependencies point one way only. The core library depends on no operating system and no heap; from the toolchain it needs `<stdatomic.h>`, `memcpy`/`memset` and a count-trailing-zeros builtin:
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -196,7 +228,7 @@ When an operation takes longer than the caller can tolerate, the servicer requir
 
 ---
 
-### Dual-Owner Hold Protocol
+### Two holds per slot
 
 Every slot in a `cfuture_pool_t` starts with **2** holders, tracked as one hold bit per side in the slot's atomic `owner` word:
 - **Owner 1** (`CFUTURE_HOLD_CONSUMER`): The Consumer handle (`cfuture_t`), held by the requester task.
@@ -216,12 +248,12 @@ graph TD
     RC2 -->|cfuture_cancel on an Undispatched Pair| RC0
 ```
 
-#### Why This Eliminates the Queue ABA Hazard
-When task $T_A$ times out, it clears only its own consumer hold; the producer hold is still set. **Crucially, the slot is NOT recycled back to the pool.** Because its bit remains set in `allocated_mask`, concurrent task $T_B$ **cannot claim this slot**. 
+#### Why a timed-out slot is not handed to someone else
+When task $T_A$ times out, it clears only its own consumer hold; the producer hold is still set. The slot is not recycled back to the pool. Because its bit remains set in `allocated_mask`, concurrent task $T_B$ **cannot claim this slot**. 
 
 Only when servicer task $T_S$ pops $T_A$'s request from the queue and releases the producer hold is the last hold gone. The final owner performs the slot recycling, so a slot cannot be reused while its producer hold is set. The one exception is a successful `cfuture_cancel()`, which recycles the slot at once; a promise copy still sitting in a queue is then rejected by its generation tag instead.
 
-#### Generation-Tagged Handles & Exclusive Claims
+#### Serial numbers on the tickets: generations and claims
 Handles are plain structs and get copied (into queue messages, retry paths, ISR contexts), so the library also defends against a handle that is used twice or outlives its slot:
 
 - **Generation tag**: the `owner` word is `(generation << CFUTURE_GEN_SHIFT) | hold bits`. Every recycle bumps the generation (wrapping at `CFUTURE_GEN_MASK` and skipping 0, which is never valid). `cfuture_t` / `cpromise_t` carry the generation they were created with.
@@ -232,7 +264,7 @@ Handles are plain structs and get copied (into queue messages, retry paths, ISR 
 
 ---
 
-### Bounded-Time Bitmask CAS Allocation
+### Claiming a slot
 
 Slot allocation is lock-free and operates on a single `atomic_uint_fast32_t allocated_mask` representing up to 32 concurrent slots (`CFUTURE_MAX_CAPACITY`). Simplified from `cfuture_pool_claim_slot()` in `src/cfuture.c` (the real function uses `uint_fast32_t` locals and returns the slot index):
 
@@ -283,7 +315,7 @@ For hardware-level clock timing and instruction pipeline relaxation, `libcfuture
 
 ---
 
-### Dependency Injection OSAL (`cfuture_sync_ops_t`)
+### Plugging in your RTOS (`cfuture_sync_ops_t`)
 
 The core (`cfuture.c`) contains zero OS `#ifdef` preprocessor directives; OS differences live only in the PAL and the adapters. Platform synchronization primitives are injected dynamically through a function pointer structure:
 
@@ -313,22 +345,24 @@ This permits testing identical embedded business logic on host developer worksta
 
 ### Fulfilment from Interrupt Context
 
-Fulfilling a promise directly from a hardware interrupt service routine (e.g., DMA transfer complete, Timer capture, UART RX idle line) is natively supported via `cpromise_set_value_from_isr()`:
+Fulfilling a promise directly from a hardware interrupt service routine (e.g., DMA transfer complete, Timer capture, UART RX idle line) is supported via `cpromise_set_value_from_isr()`:
 - The core path is a bounded CAS, a bounded `memcpy` and no blocking call; whether the signal itself is ISR-safe is the adapter's responsibility.
 - Dispatches through `sync_ops->event_set_from_isr()` when provided (e.g., `xEventGroupSetBitsFromISR` on FreeRTOS or `tx_event_flags_set` on ThreadX), otherwise through `event_set`.
 - Ensures lock-free atomic release of the producer hold.
 
 ---
 
-### Type Safety Without `void*` Casting
+### Typed wrappers
 
 The library provides macro-generated type-safe pools via `CFUTURE_DEFINE_TYPED_POOL(Prefix, Type, Capacity)`. This generates inline wrapper functions whose payload pointers are typed, so passing the wrong payload type is a compile error; the pool's payload size is checked against `sizeof(Type)` at run time.
 
 ---
 
-## 4. Finite State Machine & Concurrency Mechanics
+## 7. States and transitions
 
-### State Transition Diagram
+Each slot also records how its request ended, so the waiting side can tell a result from a refusal from its own timeout.
+
+### State diagram
 
 Every slot transitions deterministically across six discrete states (`IDLE`, `PENDING`, `COMPLETED`, `DROPPED`, `TIMEOUT`, `ABANDONED`). Labels are the API calls without their `cfuture_` / `cpromise_` prefix (`timeout` is `cfuture_wait_for()` reaching its deadline); `create()` sets both holds, `cancel()` applies only to an undispatched pair, and a resolved slot returns to `IDLE` once both holds are released:
 
@@ -351,7 +385,7 @@ stateDiagram-v2
 
 ---
 
-### State Transition Truth Table
+### Transition table
 
 Every transition out of `PENDING` is a single atomic Compare-And-Swap (CAS); if two threads race, exactly one succeeds and the loser acts on the winning state. `IDLE -> PENDING` and the return to `IDLE` are plain atomic stores, made safe by the allocation bitmask and the holds rather than by a CAS:
 
@@ -372,7 +406,9 @@ Calls made through a stale, duplicated or forged handle match no row: they fail 
 
 ---
 
-## 5. Asynchronous Concurrency Workflows
+## 8. Workflows
+
+Four walks through the same machinery: the ordinary case, a caller that gives up while its request is still queued, a worker that finishes too late, and an answer delivered from an interrupt.
 
 ### Workflow 1: Pipelined Servicer Dispatch (Happy Path)
 
@@ -402,9 +438,9 @@ sequenceDiagram
 
 ---
 
-### Workflow 2: Timeout, Cancellation & Slot Isolation (ABA Prevention)
+### Workflow 2: Timeout, Cancellation & Slot Isolation
 
-The caller times out while the request is still pending in the queue. Slot isolation prevents the ABA hazard when a second task arrives:
+The caller times out while the request is still pending in the queue. The slot stays reserved, so a second task is given a different one:
 
 ```mermaid
 sequenceDiagram
@@ -419,16 +455,16 @@ sequenceDiagram
     A->>Q: os_queue_send(&cmd_A)
     A->>P: cfuture_wait_for(&future_A, 25, &result, &status)
     Note over S: Servicer delayed by high-priority work...
-    Note over A: 25ms Deadline Expires!<br/>CAS: PENDING -> TIMEOUT<br/>Releases consumer hold<br/>Returns false to caller!
+    Note over A: 25ms Deadline Expires<br/>CAS: PENDING -> TIMEOUT<br/>Releases consumer hold<br/>Returns false to caller
     Note over A: T_A unwinds its call stack safely.
-    Note over B: Task T_B arrives and requests a slot!
+    Note over B: Task T_B arrives and requests a slot
     B->>P: cfuture_create(&pool, &promise_B, &future_B)
-    Note over P: Slot 0 is STILL ALLOCATED (producer hold)<br/>Claims Slot 1 for T_B!<br/>ZERO ABA HAZARD!
+    Note over P: Slot 0 is still reserved (producer hold)<br/>Claims Slot 1 for T_B<br/>T_B never sees the slot of T_A
     Q->>S: Servicer finally pops cmd_A from queue
     S->>P: cpromise_is_active(&promise_A)
-    Note over S: Returns false (detected TIMEOUT)!<br/>Skips expensive hardware work!
+    Note over S: Returns false (detected TIMEOUT)<br/>Skips expensive hardware work
     S->>P: cpromise_drop(&promise_A, CFUTURE_ERR_DROPPED)
-    Note over P: Releases producer hold (last)<br/>Slot 0 recycled into bitmask!
+    Note over P: Releases producer hold (last)<br/>Slot 0 recycled into bitmask
 ```
 
 ---
@@ -448,11 +484,11 @@ sequenceDiagram
     A->>S: Dispatches hardware request
     A->>P: cfuture_wait_for(&future, 30, &result, &status)
     S->>S: Servicer begins 50ms Flash Sector Erase...
-    Note over A: 30ms expires: TIMEOUT!<br/>Releases consumer hold<br/>T_A exits function!
-    Note over S: 50ms: Flash Erase completes!
+    Note over A: 30ms expires: TIMEOUT<br/>Releases consumer hold<br/>T_A exits function
+    Note over S: 50ms: Flash Erase completes
     S->>P: cpromise_set_value(&promise, &result, 0)
-    Note over P: Observes state is TIMEOUT<br/>Discards payload copy!<br/>Releases producer hold (last)<br/>Recycles Slot 3 into bitmask!
-    Note over S: Servicer continues loop normally.<br/>Zero memory leaks, zero corrupted pointers.
+    Note over P: Observes state is TIMEOUT<br/>Discards payload copy<br/>Releases producer hold (last)<br/>Recycles Slot 3 into bitmask
+    Note over S: Servicer continues loop normally.<br/>The slot is free again, nothing was written to T_A.
 ```
 
 ---
@@ -472,7 +508,7 @@ sequenceDiagram
     App->>App: Configures Peripheral DMA buffer
     App->>P: cfuture_wait_for(&future, 100, &result, &status)
     Note over App: Task blocks on OS event
-    Note over ISR: DMA Transfer Complete Interrupt Fires!
+    Note over ISR: DMA Transfer Complete Interrupt Fires
     ISR->>P: cpromise_set_value_from_isr(&promise, &dma_status, 0)
     Note over P: Lock-free atomic state -> COMPLETED<br/>Calls event_set_from_isr()<br/>Releases producer hold
     ISR-->>App: Scheduler yields to waiting Task
@@ -482,7 +518,9 @@ sequenceDiagram
 
 ---
 
-## 6. API Reference & Functional Specification
+## 9. API reference
+
+Every public function, what it returns, and what happens to the handle you pass in. Handles are consumed by the call that uses them.
 
 ### Status and Error Codes
 
@@ -656,11 +694,244 @@ Neither macro creates or initialises the `cfuture_pool_t`; the caller still call
 
 ---
 
-## 7. Canonical Implementation Walkthrough
+## 10. Platforms and adapters
 
-### Shared Servicer Pipeline (Flash Storage & Audio Tasks)
+### Adapters at a glance
 
-The following production pattern demonstrates a shared storage servicer thread processing commands from an OS queue with safe timeout unwinding:
+| Platform / RTOS | Adapter Header | Sync Primitive | Signal from ISR? | Memory | Tested in this repo? |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Linux / macOS (POSIX)** | `adapters/cfuture_posix.h` | `pthread_mutex` + `pthread_cond` (`CLOCK_MONOTONIC`; `CLOCK_REALTIME` on macOS) | No real ISR context on a host | Static table of 128 events | Yes, on Linux (unit, stress, TSan, ASan/UBSan). macOS not run |
+| **Windows (Win32)** | `adapters/cfuture_win32.h` | Win32 manual-reset event (`CreateEventA`) | No real ISR context on a host | Static table of 64 handles; the kernel objects themselves are allocated by Windows | **No.** Not built or run here. MSVC needs C11 atomics (`/experimental:c11atomics`), which the CMake build does not pass |
+| **Bare-Metal / Polling** | `adapters/cfuture_polling.h` (or `NULL`) | None: polls slot state with `cfuture_pal_cpu_relax()` | Yes (nothing to signal) | None | Yes, on Linux |
+| **FreeRTOS / ThreadX / Zephyr** | Not in this repo: `targets/<os>/osal/` in the companion [STM32F407VGT6](https://github.com/Mrunmoy/STM32F407VGT6) repo | e.g. FreeRTOS static binary semaphores | Depends on the adapter's `event_set_from_isr` | Static tables in the adapter | Not in this repo. The companion repo uses this library as a pinned git submodule and runs it on an STM32F407 board |
+
+Uncontended single-thread call overhead on an Intel Core i7-8700K (Clang 21, `-O3`), from `bench_throughput`: about 72-75 ns per create → fulfil → wait cycle with the POSIX backend and about 58 ns in polling mode. Nothing blocks in that benchmark, so these are API call costs, not wake-up latencies; no RTOS or Win32 figures have been measured.
+
+---
+
+### Native POSIX Adapter (Linux / macOS)
+
+Useful for workstation unit tests, CI pipelines, and desktop simulations. Timed waits run on `CLOCK_MONOTONIC` (wall-clock steps do not move deadlines; macOS falls back to `CLOCK_REALTIME`), and `UINT32_MAX` blocks until signaled:
+```c
+#include "cfuture.h"
+#include "adapters/cfuture_posix.h"
+
+cfuture_pool_init(&pool, CAPACITY, sizeof(packet_t),
+                  slots_memory, arena_memory,
+                  cfuture_posix_sync_ops());
+```
+
+---
+
+### Native Win32 Adapter (Windows)
+
+Provides native Win32 Event synchronization (manual-reset events, cleared through `event_reset`) for Visual Studio and MinGW environments without POSIX emulation layers:
+```c
+#include "cfuture.h"
+#include "adapters/cfuture_win32.h"
+
+cfuture_pool_init(&pool, CAPACITY, sizeof(packet_t),
+                  slots_memory, arena_memory,
+                  cfuture_win32_sync_ops());
+```
+On non-Windows builds `cfuture_win32_sync_ops()` returns `NULL`, which `cfuture_pool_init()` treats as polling mode. The adapter's lazy table initialisation is not thread-safe: initialise the first pool from one thread.
+
+---
+
+### Atomic Polling Adapter (Bare-Metal / No-OS)
+
+Zero-dependency adapter with no OS events at all (equivalent to passing `NULL`): `cfuture_wait_for()` polls the slot state, yields through `cfuture_pal_cpu_relax()` and times the deadline with `cfuture_pal_time_ms()`. It is a busy-wait: `cfuture_wait_for()` never blocks. Use it when the producer is an ISR, another core, or a higher-priority task. Under a priority-preemptive RTOS a *lower*-priority worker never gets to run while a higher-priority task polls, so every wait runs to its timeout (and a `UINT32_MAX` wait deadlocks) unless `cfuture_pal_cpu_relax()` is overridden with the RTOS yield/delay call, or an event backend is injected:
+```c
+#include "cfuture.h"
+#include "adapters/cfuture_polling.h"
+
+cfuture_pool_init(&pool, CAPACITY, sizeof(packet_t),
+                  slots_memory, arena_memory,
+                  cfuture_polling_sync_ops());
+```
+
+---
+
+### RTOS Targets (FreeRTOS, ThreadX, Zephyr)
+
+This repository ships no RTOS adapter and runs no RTOS or hardware test. FreeRTOS, ThreadX and Zephyr `cfuture_sync_ops_t` implementations live in the companion [STM32F407VGT6](https://github.com/Mrunmoy/STM32F407VGT6) repository (`targets/<os>/osal/`), which uses this library as a git submodule (`external/cfuture`) pinned to a commit. After a change here, bump that submodule and re-run its on-target self-test (FreeRTOS, ThreadX and Zephyr on an STM32F407 board; its README has the procedure and results). An RTOS port must meet the OSAL contract above (in particular the latching requirement) and provide a real tick for `cfuture_pal_time_ms()`. `STM32F407_MULTI_OS_PLAN.md` is the original plan for that repository, not a record of what it verified.
+
+---
+
+## 11. Porting notes
+
+### Data Cache and DMA (Cortex-M7 / M55 / M85)
+
+The library moves payloads with CPU `memcpy` only, which is coherent through the data cache on a single core, so it needs no cache maintenance of its own. Cache handling only matters if something other than the CPU (a DMA master, or a second heterogeneous core) writes the payload arena or the buffer you pass to `cpromise_set_value()`. In that case either place those buffers in non-cacheable memory:
+```c
+__attribute__((section(".dtcmram"))) static cfuture_slot_t s_slots[8];
+__attribute__((section(".dtcmram"))) static uint8_t s_payload_arena[8 * sizeof(packet_t)];
+```
+or follow your vendor's DMA cache rules for the DMA buffer. Do not invalidate the cache over the payload arena before reading it: that can discard a CPU write that has not reached RAM yet.
+
+---
+
+### Cortex-M0/M0+ Atomics
+
+ARMv6-M (Cortex-M0/M0+) has no LDREX/STREX, so the compiler cannot inline the library's atomics. Compiling `src/cfuture.c` for `-mcpu=cortex-m0plus` leaves calls to `__atomic_compare_exchange_4`, `__atomic_fetch_and_4` and `__atomic_fetch_add_4` (and libgcc's `__ctzsi2`) for the integrator to provide; the library does not link on M0/M0+ without them. On a single-core part they can be implemented with a PRIMASK critical section; on a dual-core part such as the RP2040 they need a hardware spinlock (e.g. pico-sdk's `pico_atomic`), because masking interrupts on one core does not exclude the other. Cortex-M3/M4/M7/M33 builds need none of this. No M0 configuration is built or tested in this repository.
+
+---
+
+### Multi-Core Payload Publication
+
+`cpromise_set_value()` writes the payload and status with plain stores and then publishes them with the `PENDING -> COMPLETED` state CAS (`memory_order_release`); `cfuture_wait_for()` reads them only after loading that state (`memory_order_acquire`). That pairing is what makes the payload visible to a consumer on another core without hand-written barriers. It relies on the toolchain's C11 atomics being correct for the target (see the Cortex-M0 note for RP2040). Only x86-64 SMP is exercised by this repository's tests.
+
+---
+
+## 12. Repository layout
+
+```text
+.
+├── CMakeLists.txt                # Root CMake build configuration
+├── build.py                      # Unified cross-platform build & test driver
+├── flake.nix                     # Hermetic Nix flake environment definition
+├── flake.lock                    # Pinned flake inputs
+├── .gitignore
+├── .clang-format                 # Allman / 4-space style enforced by --lint
+├── LICENSE                       # MIT license
+├── include/
+│   ├── cfuture.h                 # Master public C11 future/promise API & typed macros
+│   ├── cfuture_osal.h            # Pluggable OSAL synchronization table interface
+│   ├── cfuture_pal.h             # Platform Abstraction Layer (monotonic time & CPU relax)
+│   └── adapters/
+│       ├── cfuture_posix.h       # POSIX pthreads synchronization adapter
+│       ├── cfuture_win32.h       # Native Win32 events synchronization adapter
+│       └── cfuture_polling.h     # Atomic polling bare-metal adapter
+├── src/
+│   ├── cfuture.c                 # Core lock-free slot pool and state machine implementation
+│   ├── cfuture_pal.c             # Platform Abstraction Layer default implementations
+│   └── adapters/
+│       ├── cfuture_posix.c       # POSIX synchronization implementation
+│       ├── cfuture_win32.c       # Win32 synchronization implementation
+│       └── cfuture_polling.c     # Polling synchronization implementation
+├── tests/
+│   ├── CMakeLists.txt            # One GoogleTest binary per test_*.cpp
+│   ├── mock_sync_ops.hpp         # Mock synchronization provider for unit testing
+│   ├── test_pool_init.cpp        # Static pool initialization & capacity tests
+│   ├── test_lifecycle.cpp        # State transitions & payload transfer tests
+│   ├── test_timeouts.cpp         # Timeout unwinding & cancellation tests
+│   ├── test_isr_safety.cpp       # ISR completion & reentrancy tests
+│   ├── test_typed_pool.cpp       # Macro-generated typed wrapper tests
+│   ├── test_concurrency_stress.cpp # High-throughput multi-threaded stress test
+│   ├── test_error_injection.cpp  # OS failure simulation & rollback tests
+│   ├── test_generation.cpp       # Stale/duplicate handle, generation wrap & cancel tests
+│   ├── test_posix_adapter.cpp    # Direct POSIX adapter semantics tests
+│   ├── test_pal_fallback.cpp     # Waits when the PAL clock is not a real ms clock
+│   └── test_stress_chaos.cpp     # Randomised multi-threaded chaos test
+├── benchmarks/
+│   ├── CMakeLists.txt
+│   └── bench_throughput.cpp      # Call-overhead micro-benchmark (POSIX and polling modes)
+├── examples/
+│   ├── CMakeLists.txt
+│   └── sensor_pipeline.c         # End-to-end multi-task sensor showcase
+├── STM32F407_MULTI_OS_PLAN.md    # Master architecture plan for companion hardware repo
+└── README.md                     # Technical architecture documentation
+```
+
+---
+
+## 13. Getting started
+
+### Get the code
+
+```bash
+git clone https://github.com/Mrunmoy/janus.git
+cd janus
+```
+
+### Dependencies
+
+The project is developed inside the Nix shell described by `flake.nix`, which provides everything in one step (Clang, CMake, GoogleTest, cppcheck, clang-format, lcov, valgrind):
+
+```bash
+nix develop
+```
+
+Without Nix you need a C11 compiler that ships `<stdatomic.h>`, a C++17 compiler for the tests, CMake 3.16 or newer and Python 3. GoogleTest is used if it is installed; otherwise CMake downloads it on the first configure. `cppcheck`, `clang-format` and `lcov` are only needed for `--lint` and `--coverage`.
+
+### Build and run the tests
+
+```bash
+python3 build.py --build     # library, tests, benchmark and example into build/
+python3 build.py --test      # run the test suites
+./build/examples/sensor_pipeline   # a small end-to-end demo on the host
+```
+
+Inside Nix the whole pipeline is one command: `nix develop -c python3 build.py --all`.
+
+### Using it in your own project
+
+As a CMake subdirectory (for example as a git submodule). The library's own tests, benchmark and example are switched off automatically when it is not the top-level project:
+
+```cmake
+add_subdirectory(external/cfuture)
+target_link_libraries(my_firmware PRIVATE cfuture)
+```
+
+Or without CMake: compile `src/cfuture.c` and `src/cfuture_pal.c`, add `include/` to the include path, and add an adapter from `src/adapters/` only if you want one. On a microcontroller you will normally write your own small `cfuture_sync_ops_t` for your RTOS (see [Synchronization Provider Contract (OSAL)](#synchronization-provider-contract-osal)), or pass `NULL` and poll.
+
+---
+
+## 14. Usage examples
+
+### The smallest useful example
+
+No RTOS and no event backend: passing `NULL` selects polling mode. `hand_to_worker()` stands for however your system passes a small struct to another task.
+
+```c
+#include "cfuture.h"
+
+typedef struct
+{
+    uint32_t celsius_x10;
+} reading_t;
+
+/* Static storage for 4 concurrent requests: no heap involved */
+CFUTURE_DEFINE_STATIC_BUFFERS(s_readings, reading_t, 4);
+static cfuture_pool_t s_pool;
+
+bool readings_setup(void)
+{
+    return cfuture_pool_init(&s_pool, 4, sizeof(reading_t), s_readings_slots, s_readings_payload, NULL);
+}
+
+/* The asking side */
+bool read_temperature(reading_t *out)
+{
+    cpromise_t promise;
+    cfuture_t future;
+
+    if (!cfuture_create(&s_pool, &promise, &future))
+    {
+        return false; /* all 4 slots are in use right now */
+    }
+
+    hand_to_worker(promise); /* the promise is a small value: copy it into your message */
+
+    int32_t status = 0;
+    return cfuture_wait_for(&future, 50, out, &status); /* wait up to 50 ms, then give up */
+}
+
+/* The answering side: another task (or an ISR, with cpromise_set_value_from_isr) */
+void worker_handle(cpromise_t promise)
+{
+    reading_t reading = {.celsius_x10 = 215};
+    cpromise_set_value(&promise, &reading, CFUTURE_OK);
+}
+```
+
+If `read_temperature()` gives up after 50 ms and the worker answers later, the late answer is discarded and the slot is returned to the pool at that point. Nothing is written to the caller's `out`.
+
+---
+
+### A servicer task and a requester with a deadline
+
+A fuller example: one storage servicer task taking commands from an OS queue, and a requester that gives up after a deadline. `os_queue_*`, `hardware_flash_write_sector()` and `calculate_crc32()` stand for whatever your system provides.
 
 ```c
 #include "cfuture.h"
@@ -706,7 +977,7 @@ void storage_servicer_task_loop(void *queue_handle)
         // Did the caller already time out while this request sat in the queue?
         if (!cpromise_is_active(&req.promise))
         {
-            // Skip expensive flash erase & write!
+            // Skip expensive flash erase & write
             cpromise_drop(&req.promise, CFUTURE_ERR_DROPPED); // Safely recycles slot
             continue;
         }
@@ -770,7 +1041,7 @@ bool save_audio_sample_safe(uint32_t sector, const uint8_t *data, uint32_t timeo
 
 ---
 
-### DMA Interrupt Service Routine Completion
+### Fulfilling a promise from an interrupt handler
 
 ```c
 static cpromise_t g_active_dma_promise;
@@ -792,177 +1063,7 @@ void DMA2_Stream0_IRQHandler(void)
 
 ---
 
-## 8. Platform Support & Adapter Matrix
-
-### Target Platform Comparison
-
-| Platform / RTOS | Adapter Header | Sync Primitive | Signal from ISR? | Memory | Tested in this repo? |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Linux / macOS (POSIX)** | `adapters/cfuture_posix.h` | `pthread_mutex` + `pthread_cond` (`CLOCK_MONOTONIC`; `CLOCK_REALTIME` on macOS) | No real ISR context on a host | Static table of 128 events | Yes, on Linux (unit, stress, TSan, ASan/UBSan). macOS not run |
-| **Windows (Win32)** | `adapters/cfuture_win32.h` | Win32 manual-reset event (`CreateEventA`) | No real ISR context on a host | Static table of 64 handles; the kernel objects themselves are allocated by Windows | **No.** Not built or run here. MSVC needs C11 atomics (`/experimental:c11atomics`), which the CMake build does not pass |
-| **Bare-Metal / Polling** | `adapters/cfuture_polling.h` (or `NULL`) | None: polls slot state with `cfuture_pal_cpu_relax()` | Yes (nothing to signal) | None | Yes, on Linux |
-| **FreeRTOS / ThreadX / Zephyr** | Not in this repo: `targets/<os>/osal/` in the companion [STM32F407VGT6](https://github.com/Mrunmoy/STM32F407VGT6) repo | e.g. FreeRTOS static binary semaphores | Depends on the adapter's `event_set_from_isr` | Static tables in the adapter | **No.** Nothing in this repo builds or tests them, and that repo vendors its own copy of this library |
-
-Uncontended single-thread call overhead on an Intel Core i7-8700K (Clang 21, `-O3`), from `bench_throughput`: about 72-75 ns per create → fulfil → wait cycle with the POSIX backend and about 58 ns in polling mode. Nothing blocks in that benchmark, so these are API call costs, not wake-up latencies; no RTOS or Win32 figures have been measured.
-
----
-
-### Native POSIX Adapter (Linux / macOS)
-
-Ideal for workstation unit tests, CI pipelines, and desktop simulations. Timed waits run on `CLOCK_MONOTONIC` (wall-clock steps do not move deadlines; macOS falls back to `CLOCK_REALTIME`), and `UINT32_MAX` blocks until signaled:
-```c
-#include "cfuture.h"
-#include "adapters/cfuture_posix.h"
-
-cfuture_pool_init(&pool, CAPACITY, sizeof(packet_t),
-                  slots_memory, arena_memory,
-                  cfuture_posix_sync_ops());
-```
-
----
-
-### Native Win32 Adapter (Windows)
-
-Provides native Win32 Event synchronization (manual-reset events, cleared through `event_reset`) for Visual Studio and MinGW environments without POSIX emulation layers:
-```c
-#include "cfuture.h"
-#include "adapters/cfuture_win32.h"
-
-cfuture_pool_init(&pool, CAPACITY, sizeof(packet_t),
-                  slots_memory, arena_memory,
-                  cfuture_win32_sync_ops());
-```
-On non-Windows builds `cfuture_win32_sync_ops()` returns `NULL`, which `cfuture_pool_init()` treats as polling mode. The adapter's lazy table initialisation is not thread-safe: initialise the first pool from one thread.
-
----
-
-### Atomic Polling Adapter (Bare-Metal / No-OS)
-
-Zero-dependency adapter with no OS events at all (equivalent to passing `NULL`): `cfuture_wait_for()` polls the slot state, yields through `cfuture_pal_cpu_relax()` and times the deadline with `cfuture_pal_time_ms()`. It is a busy-wait: `cfuture_wait_for()` never blocks. Use it when the producer is an ISR, another core, or a higher-priority task. Under a priority-preemptive RTOS a *lower*-priority worker never gets to run while a higher-priority task polls, so every wait runs to its timeout (and a `UINT32_MAX` wait deadlocks) unless `cfuture_pal_cpu_relax()` is overridden with the RTOS yield/delay call, or an event backend is injected:
-```c
-#include "cfuture.h"
-#include "adapters/cfuture_polling.h"
-
-cfuture_pool_init(&pool, CAPACITY, sizeof(packet_t),
-                  slots_memory, arena_memory,
-                  cfuture_polling_sync_ops());
-```
-
----
-
-### RTOS Targets (FreeRTOS, ThreadX, Zephyr)
-
-This repository ships no RTOS adapter and runs no RTOS or hardware test. FreeRTOS, ThreadX and Zephyr `cfuture_sync_ops_t` implementations live in the companion [STM32F407VGT6](https://github.com/Mrunmoy/STM32F407VGT6) repository (`targets/<os>/osal/`), which vendors a copy of this library under `external/cfuture`; after a change here, that copy has to be updated and re-verified there. An RTOS port must meet the OSAL contract above (in particular the latching requirement) and provide a real tick for `cfuture_pal_time_ms()`. `STM32F407_MULTI_OS_PLAN.md` is the original plan for that repository, not a record of what it verified.
-
----
-
-## 9. Microcontroller Porting & Silicon Guidelines
-
-### Data Cache and DMA (Cortex-M7 / M55 / M85)
-
-The library moves payloads with CPU `memcpy` only, which is coherent through the data cache on a single core, so it needs no cache maintenance of its own. Cache handling only matters if something other than the CPU (a DMA master, or a second heterogeneous core) writes the payload arena or the buffer you pass to `cpromise_set_value()`. In that case either place those buffers in non-cacheable memory:
-```c
-__attribute__((section(".dtcmram"))) static cfuture_slot_t s_slots[8];
-__attribute__((section(".dtcmram"))) static uint8_t s_payload_arena[8 * sizeof(packet_t)];
-```
-or follow your vendor's DMA cache rules for the DMA buffer. Do not invalidate the cache over the payload arena before reading it: that can discard a CPU write that has not reached RAM yet.
-
----
-
-### Cortex-M0/M0+ Atomics
-
-ARMv6-M (Cortex-M0/M0+) has no LDREX/STREX, so the compiler cannot inline the library's atomics. Compiling `src/cfuture.c` for `-mcpu=cortex-m0plus` leaves calls to `__atomic_compare_exchange_4`, `__atomic_fetch_and_4` and `__atomic_fetch_add_4` (and libgcc's `__ctzsi2`) for the integrator to provide; the library does not link on M0/M0+ without them. On a single-core part they can be implemented with a PRIMASK critical section; on a dual-core part such as the RP2040 they need a hardware spinlock (e.g. pico-sdk's `pico_atomic`), because masking interrupts on one core does not exclude the other. Cortex-M3/M4/M7/M33 builds need none of this. No M0 configuration is built or tested in this repository.
-
----
-
-### Multi-Core Payload Publication
-
-`cpromise_set_value()` writes the payload and status with plain stores and then publishes them with the `PENDING -> COMPLETED` state CAS (`memory_order_release`); `cfuture_wait_for()` reads them only after loading that state (`memory_order_acquire`). That pairing is what makes the payload visible to a consumer on another core without hand-written barriers. It relies on the toolchain's C11 atomics being correct for the target (see the Cortex-M0 note for RP2040). Only x86-64 SMP is exercised by this repository's tests.
-
----
-
-## 10. Memory Footprint & Benchmark Telemetry
-
-### Static Memory Footprint
-
-Host object sizes, release build inside the Nix dev shell (`clang 21.1.8 -O3 -DNDEBUG`, x86-64). This table is what `build.py --docs` checks; x86-64 is not a ROM target, so treat it as a regression reference only:
-
-```text
---- Binary Footprint (size) ---
-   text    data     bss     dec     hex filename
-   4160       0       8    4168    1048 cfuture.c.o
-    218       0       0     218      da cfuture_pal.c.o
-    117       0       0     117      75 cfuture_polling.c.o
-   1142      48   12337   13527    34d7 cfuture_posix.c.o
-```
-
-Cross-compiled objects (`arm-none-eabi-gcc 15.3 -std=c11 -Os -mthumb`; compiled only, not linked or run on hardware):
-
-| Target | `cfuture.c` text | `cfuture_pal.c` text | `.bss` |
-| :--- | :--- | :--- | :--- |
-| Cortex-M4 | 1,660 bytes | 44 bytes | 4 + 4 bytes |
-| Cortex-M0+ | 1,640 bytes | 40 bytes | 4 + 4 bytes (plus the `__atomic_*` helpers the integrator must supply) |
-
-- **Library static RAM**: two `uint_fast32_t` words on Cortex-M: the pool-init epoch counter in the core, and the PAL's fallback tick (unused once `HAL_GetTick()` is linked; gone if `cfuture_pal_time_ms()` is overridden). On the x86-64 host it is one 8-byte word. All pool, slot and payload storage is caller-provided. The POSIX adapter's static event table (about 12 KB) is host-only.
-- **Dynamic Heap Memory (`malloc`/`free`)**: none; `build.py --stats` fails if `nm` finds an allocation symbol in `libcfuture.a`.
-
----
-
-### Latency & Throughput Benchmarks
-
-`bench_throughput`, Intel Core i7-8700K, Clang 21 `-O3`, 100,000 iterations per line. Single-threaded and uncontended: the value is always there before the wait, so nothing blocks. These are API call costs, not wake-up latencies:
-
-| Cycle | POSIX event backend | Polling mode |
-| :--- | :--- | :--- |
-| Create → Abandon → Drop | ~59 ns (~17 M/s) | ~52 ns (~19 M/s) |
-| Create → Fulfill → Wait | ~72-75 ns (~13-14 M/s) | ~58 ns (~17 M/s) |
-
-Each side pays one extra CAS per transaction for its generation-checked claim; that is the cost of stale and duplicated handles being harmless.
-
----
-
-## 11. Verification, Testing & Static Analysis
-
-### GoogleTest Test Suite Matrix
-
-The test harness comprises 11 suites, all run on a Linux x86-64 host. Everything except the time-boxed chaos run finishes in about a second; `test_stress_chaos` runs 1.5 s for each of its three sync modes by default (set `CFUTURE_STRESS_MS` for longer soaks):
-
-| Test Suite | Binary Target | What it actually tests |
-| :--- | :--- | :--- |
-| **`test_pool_init`** | `build/tests/test_pool_init` | Argument validation of `cfuture_pool_init()` / `cfuture_create()`, slot initialisation, sequential allocation until full, polling-mode wait with no sync ops. |
-| **`test_lifecycle`** | `build/tests/test_lifecycle` | Create/fulfil/consume, drop, abandon, slot reuse, zero-size and struct payloads, NULL-payload completion not leaking the previous occupant's data, a full cycle through `cfuture_polling_sync_ops()`. |
-| **`test_timeouts`** | `build/tests/test_timeouts` | Zero timeout, timed-out waits, the OSAL wait contract (a false return is the timeout and is not retried; failed forever-waits are retried; the backend timeout is not multiplied), stale latched signals, the largest finite timeout. |
-| **`test_isr_safety`** | `build/tests/test_isr_safety` | The `_from_isr` entry points call the ISR sync hook and deliver / drop / recycle correctly, including an ISR-only backend with no `event_set`. Called from an ordinary thread through the mock: no real interrupt, pre-emption or re-entrancy is exercised. |
-| **`test_typed_pool`** | `build/tests/test_typed_pool` | Every generated wrapper of one typed pool, including ISR variants and cancel, and rejection of a pool with a different payload size. |
-| **`test_concurrency_stress`** | `build/tests/test_concurrency_stress` | 100k multi-threaded producer/consumer cycles, a duplicate-producer race, a stale-handle hammer. |
-| **`test_error_injection`** | `build/tests/test_error_injection` | Event-creation failure and rollback, NULL / out-of-range / invalidated handles, double wait / fulfil / abandon / drop, pool saturation and recovery, custom drop codes. |
-| **`test_generation`** | `build/tests/test_generation` | Stale, duplicated and forged handles, generation wrap, pool re-init, `cfuture_cancel()`. |
-| **`test_posix_adapter`** | `build/tests/test_posix_adapter` | POSIX event latch/reset/timeout semantics, lost-wakeup ping-pong. |
-| **`test_pal_fallback`** | `build/tests/test_pal_fallback` | Waits when the PAL clock only counts calls while the backend blocks for real: the timeout is not multiplied, values still arrive, stale signals are handled, polling still terminates. |
-| **`test_stress_chaos`** | `build/tests/test_stress_chaos` | Randomised multi-threaded scenarios (timeouts, abandons, drops, duplicates, cancels, stale replays) in event, polling and hostile-OSAL modes (frequent fake signals and no `event_reset`). |
-
-**Not tested anywhere in this repository**: the Win32 adapter and Win32 PAL branch (never compiled here), the Cortex-M PAL branch (compile-checked with `arm-none-eabi-gcc` only), any RTOS adapter, any real interrupt context, any hardware, macOS, and MSVC. There is no CI; the results below come from running `build.py` locally in the Nix shell.
-
----
-
-### Sanitizer Verification (TSan, ASan, UBSan)
-
-- **ThreadSanitizer**: `build.py --tsan` runs the whole suite (including the 100k-cycle stress test and all three chaos modes) and reports no data races.
-- **AddressSanitizer & UndefinedBehaviorSanitizer**: `build.py --asan` runs the whole suite with no reports.
-
-Both are Linux x86-64 host runs with Clang 21; they say nothing about other targets.
-
----
-
-### Static Analysis & Code Style
-
-- **Clang-Format**: Allman braces, 4-space indentation (`.clang-format`), checked by `build.py --lint` over `src/`, `include/`, `tests/`, `benchmarks/` and `examples/`.
-- **Cppcheck**: `--enable=all` over `src/` only, with `missingIncludeSystem`, `unusedFunction` and `normalCheckLevelMaxBranches` suppressed; no findings.
-- **Compiler Flags**: `-Wall -Wextra -Werror -pedantic` on the library, tests, benchmark and example, plus `-Wshadow -Wundef -Wstrict-prototypes -Wpointer-arith -Wcast-align` on the library (GCC/Clang). The coverage build adds `-Wno-error`. `/W4 /WX` is set for MSVC on the library target, but MSVC builds are untested.
-
----
-
-## 12. Build Automation & Tooling (`build.py`)
+## 15. Building and testing
 
 A Python build driver (`build.py`) wraps CMake/CTest. It is written to be portable, but it is only exercised on Linux inside the Nix shell:
 
@@ -989,7 +1090,7 @@ python3 build.py --all
 
 ---
 
-### Hermetic Nix Development Environment
+### Nix development shell
 
 The project is meant to be built inside the reproducible environment defined by `flake.nix` (Clang, CMake, GoogleTest, cppcheck, clang-format, lcov, valgrind; Ninja is available, though `build.py` uses CMake's default generator). The footprint, coverage and benchmark figures in this document were measured there:
 
@@ -1003,58 +1104,92 @@ nix develop -c python3 build.py --all
 
 ---
 
-## 13. Repository Layout & File Taxonomy
+## 16. How it is tested
 
-```text
-.
-├── CMakeLists.txt                # Root CMake build configuration
-├── build.py                      # Unified cross-platform build & test driver
-├── flake.nix                     # Hermetic Nix flake environment definition
-├── flake.lock                    # Pinned flake inputs
-├── .gitignore
-├── .clang-format                 # Allman / 4-space style enforced by --lint
-├── LICENSE                       # MIT license
-├── include/
-│   ├── cfuture.h                 # Master public C11 future/promise API & typed macros
-│   ├── cfuture_osal.h            # Pluggable OSAL synchronization table interface
-│   ├── cfuture_pal.h             # Platform Abstraction Layer (monotonic time & CPU relax)
-│   └── adapters/
-│       ├── cfuture_posix.h       # POSIX pthreads synchronization adapter
-│       ├── cfuture_win32.h       # Native Win32 events synchronization adapter
-│       └── cfuture_polling.h     # Atomic polling bare-metal adapter
-├── src/
-│   ├── cfuture.c                 # Core lock-free slot pool and state machine implementation
-│   ├── cfuture_pal.c             # Platform Abstraction Layer default implementations
-│   └── adapters/
-│       ├── cfuture_posix.c       # POSIX synchronization implementation
-│       ├── cfuture_win32.c       # Win32 synchronization implementation
-│       └── cfuture_polling.c     # Polling synchronization implementation
-├── tests/
-│   ├── CMakeLists.txt            # One GoogleTest binary per test_*.cpp
-│   ├── mock_sync_ops.hpp         # Mock synchronization provider for unit testing
-│   ├── test_pool_init.cpp        # Static pool initialization & capacity tests
-│   ├── test_lifecycle.cpp        # State transitions & payload transfer tests
-│   ├── test_timeouts.cpp         # Timeout unwinding & cancellation tests
-│   ├── test_isr_safety.cpp       # ISR completion & reentrancy tests
-│   ├── test_typed_pool.cpp       # Macro-generated typed wrapper tests
-│   ├── test_concurrency_stress.cpp # High-throughput multi-threaded stress test
-│   ├── test_error_injection.cpp  # OS failure simulation & rollback tests
-│   ├── test_generation.cpp       # Stale/duplicate handle, generation wrap & cancel tests
-│   ├── test_posix_adapter.cpp    # Direct POSIX adapter semantics tests
-│   ├── test_pal_fallback.cpp     # Waits when the PAL clock is not a real ms clock
-│   └── test_stress_chaos.cpp     # Randomised multi-threaded chaos test
-├── benchmarks/
-│   ├── CMakeLists.txt
-│   └── bench_throughput.cpp      # Call-overhead micro-benchmark (POSIX and polling modes)
-├── examples/
-│   ├── CMakeLists.txt
-│   └── sensor_pipeline.c         # End-to-end multi-task sensor showcase
-├── STM32F407_MULTI_OS_PLAN.md    # Master architecture plan for companion hardware repo
-└── README.md                     # Technical architecture documentation
-```
+What the tests in this repository cover, and just as importantly what they do not.
+
+### Test suites
+
+The test harness comprises 11 suites, all run on a Linux x86-64 host. Everything except the time-boxed chaos run finishes in about a second; `test_stress_chaos` runs 1.5 s for each of its three sync modes by default (set `CFUTURE_STRESS_MS` for longer soaks):
+
+| Test Suite | Binary Target | What it actually tests |
+| :--- | :--- | :--- |
+| **`test_pool_init`** | `build/tests/test_pool_init` | Argument validation of `cfuture_pool_init()` / `cfuture_create()`, slot initialisation, sequential allocation until full, polling-mode wait with no sync ops. |
+| **`test_lifecycle`** | `build/tests/test_lifecycle` | Create/fulfil/consume, drop, abandon, slot reuse, zero-size and struct payloads, NULL-payload completion not leaking the previous occupant's data, a full cycle through `cfuture_polling_sync_ops()`. |
+| **`test_timeouts`** | `build/tests/test_timeouts` | Zero timeout, timed-out waits, the OSAL wait contract (a false return is the timeout and is not retried; failed forever-waits are retried; the backend timeout is not multiplied), stale latched signals, the largest finite timeout. |
+| **`test_isr_safety`** | `build/tests/test_isr_safety` | The `_from_isr` entry points call the ISR sync hook and deliver / drop / recycle correctly, including an ISR-only backend with no `event_set`. Called from an ordinary thread through the mock: no real interrupt, pre-emption or re-entrancy is exercised. |
+| **`test_typed_pool`** | `build/tests/test_typed_pool` | Every generated wrapper of one typed pool, including ISR variants and cancel, and rejection of a pool with a different payload size. |
+| **`test_concurrency_stress`** | `build/tests/test_concurrency_stress` | 100k multi-threaded producer/consumer cycles, a duplicate-producer race, a stale-handle hammer. |
+| **`test_error_injection`** | `build/tests/test_error_injection` | Event-creation failure and rollback, NULL / out-of-range / invalidated handles, double wait / fulfil / abandon / drop, pool saturation and recovery, custom drop codes. |
+| **`test_generation`** | `build/tests/test_generation` | Stale, duplicated and forged handles, generation wrap, pool re-init, `cfuture_cancel()`. |
+| **`test_posix_adapter`** | `build/tests/test_posix_adapter` | POSIX event latch/reset/timeout semantics, lost-wakeup ping-pong. |
+| **`test_pal_fallback`** | `build/tests/test_pal_fallback` | Waits when the PAL clock only counts calls while the backend blocks for real: the timeout is not multiplied, values still arrive, stale signals are handled, polling still terminates. |
+| **`test_stress_chaos`** | `build/tests/test_stress_chaos` | Randomised multi-threaded scenarios (timeouts, abandons, drops, duplicates, cancels, stale replays) in event, polling and hostile-OSAL modes (frequent fake signals and no `event_reset`). |
+
+**Not tested anywhere in this repository**: the Win32 adapter and Win32 PAL branch (never compiled here), the Cortex-M PAL branch (compile-checked with `arm-none-eabi-gcc` only), any RTOS adapter, any real interrupt context, any hardware, macOS, and MSVC. There is no CI; the results below come from running `build.py` locally in the Nix shell.
 
 ---
 
-## 14. License
+### Sanitizer runs
+
+- **ThreadSanitizer**: `build.py --tsan` runs the whole suite (including the 100k-cycle stress test and all three chaos modes) and reports no data races.
+- **AddressSanitizer & UndefinedBehaviorSanitizer**: `build.py --asan` runs the whole suite with no reports.
+
+Both are Linux x86-64 host runs with Clang 21; they say nothing about other targets.
+
+---
+
+### Static Analysis & Code Style
+
+- **Clang-Format**: Allman braces, 4-space indentation (`.clang-format`), checked by `build.py --lint` over `src/`, `include/`, `tests/`, `benchmarks/` and `examples/`.
+- **Cppcheck**: `--enable=all` over `src/` only, with `missingIncludeSystem`, `unusedFunction` and `normalCheckLevelMaxBranches` suppressed; no findings.
+- **Compiler Flags**: `-Wall -Wextra -Werror -pedantic` on the library, tests, benchmark and example, plus `-Wshadow -Wundef -Wstrict-prototypes -Wpointer-arith -Wcast-align` on the library (GCC/Clang). The coverage build adds `-Wno-error`. `/W4 /WX` is set for MSVC on the library target, but MSVC builds are untested.
+
+---
+
+## 17. Performance
+
+Measured numbers, with how and where they were measured. They are small, but they are one machine and one toolchain; measure on your own target before relying on them.
+
+### Code and data size
+
+Host object sizes, release build inside the Nix dev shell (`clang 21.1.8 -O3 -DNDEBUG`, x86-64). This table is what `build.py --docs` checks; x86-64 is not a ROM target, so treat it as a regression reference only:
+
+```text
+--- Binary Footprint (size) ---
+   text    data     bss     dec     hex filename
+   4160       0       8    4168    1048 cfuture.c.o
+    218       0       0     218      da cfuture_pal.c.o
+    117       0       0     117      75 cfuture_polling.c.o
+   1142      48   12337   13527    34d7 cfuture_posix.c.o
+```
+
+Cross-compiled objects (`arm-none-eabi-gcc 15.3 -std=c11 -Os -mthumb`; compiled only, not linked or run on hardware):
+
+| Target | `cfuture.c` text | `cfuture_pal.c` text | `.bss` |
+| :--- | :--- | :--- | :--- |
+| Cortex-M4 | 1,660 bytes | 44 bytes | 4 + 4 bytes |
+| Cortex-M0+ | 1,640 bytes | 40 bytes | 4 + 4 bytes (plus the `__atomic_*` helpers the integrator must supply) |
+
+- **Library static RAM**: two `uint_fast32_t` words on Cortex-M: the pool-init epoch counter in the core, and the PAL's fallback tick (unused once `HAL_GetTick()` is linked; gone if `cfuture_pal_time_ms()` is overridden). On the x86-64 host it is one 8-byte word. All pool, slot and payload storage is caller-provided. The POSIX adapter's static event table (about 12 KB) is host-only.
+- **Dynamic Heap Memory (`malloc`/`free`)**: none; `build.py --stats` fails if `nm` finds an allocation symbol in `libcfuture.a`.
+
+---
+
+### Call overhead
+
+`bench_throughput`, Intel Core i7-8700K, Clang 21 `-O3`, 100,000 iterations per line. Single-threaded and uncontended: the value is always there before the wait, so nothing blocks. These are API call costs, not wake-up latencies:
+
+| Cycle | POSIX event backend | Polling mode |
+| :--- | :--- | :--- |
+| Create → Abandon → Drop | ~59 ns (~17 M/s) | ~52 ns (~19 M/s) |
+| Create → Fulfill → Wait | ~72-75 ns (~13-14 M/s) | ~58 ns (~17 M/s) |
+
+Each side pays one extra CAS per transaction for its generation-checked claim; that is the cost of stale and duplicated handles being harmless.
+
+---
+
+## 18. License
 
 This project is licensed under the terms of the [MIT License](LICENSE).
+
